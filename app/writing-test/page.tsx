@@ -209,6 +209,7 @@ export default function WritingTestPage() {
             lang="en"
           />
 
+          {/* Varování podlimitu */}
           {task && (
             <div className={`text-sm mt-2 ${isDark ? "text-red-300" : "text-red-600"}`}>
               {words < Math.round((task.minWords ?? 120) * 0.5) && "Text je příliš krátký – skóre je limitováno (max 2/10)."}
@@ -237,29 +238,46 @@ export default function WritingTestPage() {
 
           {result && (
             <>
-              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+              <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
                 <ScoreCard label="Language resources & accuracy" val={result.scores.language} />
                 <ScoreCard label="Form (format & requirements)" val={result.scores.form} />
                 <ScoreCard label="Organisation & content" val={result.scores.organisation} />
                 <ScoreCard label="Effect on the reader" val={result.scores.effect} />
+                <ScoreCard label="Grammar & mechanics" val={result.scores.grammar} />
               </div>
 
               <div className="text-sm">
-                Celkem: <span className="font-semibold">{result.total40} / 40</span> ≈ <b>{(result.total40/4).toFixed(1)} / 10</b>
+                Celkem: <span className="font-semibold">{result.total50} / 50</span> ≈ <b>{(result.total50/5).toFixed(1)} / 10</b>
                 <span className={`ml-2 ${chip}`}>
                   (Words: {result.facts.words}, Paragraphs: {result.facts.paragraphs}, Linking: {result.facts.linkingWords},
-                  Spelling: {result.facts.spellingErrors})
+                  Spelling: {result.facts.spellingErrors}, Grammar: {result.facts.grammarErrors})
                 </span>
               </div>
 
-              {result.spelling && result.spelling.length > 0 && (
+              {/* Pravopis a gramatika – seznam */}
+              {(result.spelling?.length || 0) > 0 && (
                 <div>
                   <h3 className="font-semibold mb-1">Pravopis – doporučené opravy:</h3>
                   <ul className={`list-disc pl-5 text-sm ${isDark ? "text-neutral-200" : "text-neutral-700"}`}>
-                    {result.spelling.map((s, i) => (
+                    {result.spelling!.map((s, i) => (
                       <li key={i}>
                         <code className="px-1 rounded bg-black/20">{s.word}</code> → <b>{s.suggestion}</b>
                         {s.count > 1 ? ` (${s.count}×)` : ""}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {(result.grammar?.length || 0) > 0 && (
+                <div>
+                  <h3 className="font-semibold mb-1">Gramatika & mechanika – nalezené problémy:</h3>
+                  <ul className={`list-disc pl-5 text-sm ${isDark ? "text-neutral-200" : "text-neutral-700"}`}>
+                    {result.grammar!.map((g, i) => (
+                      <li key={i}>
+                        {g.message}
+                        {g.example ? <> – <code className="px-1 rounded bg-black/20">{g.example}</code></> : null}
+                        {g.count > 1 ? ` (${g.count}×)` : ""}
                       </li>
                     ))}
                   </ul>
