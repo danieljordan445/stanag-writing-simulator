@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -60,7 +60,7 @@ export default function WritingTestPage() {
 
   // word count
   useEffect(() => {
-    const m = textValue.trim().match(/[A-Za-zÀ-ž']+/g);
+    const m = textValue.trim().match(/[A-Za-zÀ-ž]+(?:'[A-Za-zÀ-ž]+)?/g);
     setWords(m ? m.length : 0);
   }, [textValue]);
 
@@ -106,6 +106,19 @@ export default function WritingTestPage() {
     setTextValue("");
     setResult(null);
   }
+
+  // ===== Auto-evaluate (debounce) =====
+  const debounceRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!task) return;             // bez tasku nevyhodnocujeme
+    if (words === 0) { setResult(null); return; }
+    if (debounceRef.current) window.clearTimeout(debounceRef.current);
+    debounceRef.current = window.setTimeout(() => {
+      const r = evaluateSubmission(textValue, task);
+      setResult(r);
+    }, 600); // 600 ms po dopsání
+    return () => { if (debounceRef.current) window.clearTimeout(debounceRef.current); };
+  }, [textValue, words, task]);
 
   // ===== UI helpers =====
   const ScoreCard = ({ label, val }: { label: string; val: number }) => {
@@ -183,7 +196,7 @@ export default function WritingTestPage() {
         <CardContent className="p-6 grid gap-4">
           <div className={`flex flex-wrap justify-between items-center text-sm ${subText} gap-2`}>
             <div>
-              Min. {task?.minWords ?? 120} / 200 words · Timer: <span className="font-mono">{(Math.floor(timer/60)).toString().padStart(2,"0")}:{(Math.floor(timer%60)).toString().padStart(2,"0")}</span>
+              Min. {task?.minWords ?? 120} / 200 words · Timer: <span className="font-mono">{displayTime}</span>
             </div>
             <div>Words: <span className="font-semibold">{words}</span></div>
           </div>
@@ -212,7 +225,7 @@ export default function WritingTestPage() {
             </div>
             <div className="flex gap-3">
               <Button className={`${btnOutline}`} onClick={handleClear}>Clear</Button>
-              <Button className={`${btnPrimary}`} onClick={handleEvaluate} disabled={!task}>Evaluate</Button>
+              <Button className={`${btnPrimary}`} onClick={handleEvaluate} disabled={!task || words === 0}>Evaluate</Button>
             </div>
           </div>
         </CardContent>
@@ -223,7 +236,7 @@ export default function WritingTestPage() {
         <CardContent className="p-6 grid gap-4">
           <h2 className="text-lg font-semibold">Výsledek</h2>
 
-          {!result && <div className={`${chip} text-sm`}>Napiš text a klikni „Evaluate“. Zobrazí se skóre a doporučení.</div>}
+          {!result && <div className={`${chip} text-sm`}>Vyber Task, napiš text a skóre se začne počítat automaticky.</div>}
 
           {result && (
             <>
