@@ -29,6 +29,8 @@ const CONTRACTIONS = [
 const STOP = new Set(["the","a","an","and","or","to","for","of","in","on","at","with","about","from","is","are","be","as","by","that","this","these","those"]);
 
 function clamp(n: number, min: number, max: number) { return Math.max(min, Math.min(max, n)); }
+
+// — počty —
 function wordCount(txt: string) {
   const m = txt.trim().match(/[A-Za-zÀ-ž]+(?:'[A-Za-zÀ-ž]+)?/g);
   return m ? m.length : 0;
@@ -95,7 +97,7 @@ export function evaluateSubmission(txt: string, task: WritingTask): EvalResult {
   const fiftyPct = Math.round(task.minWords * 0.5);
   const seventyPct = Math.round(task.minWords * 0.7);
 
-  // 0) Prakticky bez textu → skoro nula
+  // 0) Prakticky bez textu → nula
   if (words < 5) {
     const scores = { language: 0, form: 0, organisation: 0, effect: 0 };
     return {
@@ -108,13 +110,13 @@ export function evaluateSubmission(txt: string, task: WritingTask): EvalResult {
     };
   }
 
-  // 1) < 50 % minima → extrémní penalizace (cap na 2 body)
+  // 1) <50 % minima → max 2/10 v každé kategorii
   let hardCap = 10;
   if (words < fiftyPct) hardCap = 2;
-  // 2) 50–70 % minima → silná penalizace (cap na 4 body)
+  // 2) 50–70 % minima → max 4/10
   else if (words < seventyPct) hardCap = 4;
 
-  // ===== Base výpočty (bez capu) =====
+  // ===== ZÁKLADNÍ VÝPOČTY =====
   const formality = FORMAL_CUES.reduce((s, cue) => s + (lower.includes(cue) ? 1 : 0), 0);
 
   // LANGUAGE – TTR + linking + kontrakce
@@ -124,7 +126,7 @@ export function evaluateSubmission(txt: string, task: WritingTask): EvalResult {
   if (ttr >= 0.65) language += 1;
   if (links >= 2) language += 1;
   if (links >= 4) language += 1;
-  if (contractions === 0) language += 2;        // formální jazyk
+  if (contractions === 0) language += 2;
   else if (contractions >= 2) language -= 1;
   language = clamp(language, 0, 10);
 
@@ -135,7 +137,6 @@ export function evaluateSubmission(txt: string, task: WritingTask): EvalResult {
   if (words >= task.minWords) form += 4;
   if (words >= Math.round(task.minWords * 1.2)) form += 1;
   if (contractions === 0) form += 1; else if (contractions >= 3) form -= 1;
-  // podlimit: pokud jsme pod minimem, form později seřízne capem
   form = clamp(form, 0, 10);
 
   // ORGANISATION – odstavce + linking + coverage
@@ -146,7 +147,7 @@ export function evaluateSubmission(txt: string, task: WritingTask): EvalResult {
   if (coveredCount === task.points.length) organisation += 3;
   organisation = clamp(organisation, 0, 10);
 
-  // EFFECT – dojem + délka + formálnost
+  // EFFECT – dojem + formálnost + délka
   let effect = 0;
   if (formality >= 2) effect += 2;
   if (paras >= 3) effect += 1;
@@ -154,13 +155,13 @@ export function evaluateSubmission(txt: string, task: WritingTask): EvalResult {
   if (coveredCount < task.points.length) effect -= 1;
   effect = clamp(effect, 0, 10);
 
-  // Globální cap při chybějícím pokrytí
+  // Globální omezení, pokud nejsou pokryty body zadání
   if (coveredCount < task.points.length) {
     organisation = Math.min(organisation, 7);
     effect = Math.min(effect, 7);
   }
 
-  // UPLATNI DÉLKOVÝ CAP
+  // Uplatni cap podle délky
   language = Math.min(language, hardCap);
   form = Math.min(form, hardCap);
   organisation = Math.min(organisation, hardCap);
