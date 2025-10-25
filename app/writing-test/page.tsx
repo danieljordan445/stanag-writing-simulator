@@ -10,7 +10,6 @@ import { evaluateSubmission, type EvalResult } from "@/lib/evaluate";
 type Mode = "idle" | "task1" | "task2";
 
 export default function WritingTestPage() {
-  // ===== THEMING (black/white) =====
   const [isDark, setIsDark] = useState(true);
   const bg = isDark ? "bg-black" : "bg-white";
   const text = isDark ? "text-white" : "text-black";
@@ -29,15 +28,13 @@ export default function WritingTestPage() {
     ? "bg-white text-black hover:bg-neutral-200 border border-neutral-600"
     : "bg-black text-white hover:bg-neutral-900 border border-neutral-700";
 
-  // ===== STATE =====
   const [mode, setMode] = useState<Mode>("idle");
   const [task, setTask] = useState<WritingTask | null>(null);
   const [textValue, setTextValue] = useState("");
   const [words, setWords] = useState(0);
-  const [timer, setTimer] = useState(80 * 60); // 80 minutes
+  const [timer, setTimer] = useState(80 * 60);
   const [result, setResult] = useState<EvalResult | null>(null);
 
-  // load previous attempt
   useEffect(() => {
     const saved = localStorage.getItem("stanag_last_attempt");
     if (saved) {
@@ -50,7 +47,6 @@ export default function WritingTestPage() {
     }
   }, []);
 
-  // auto-save
   useEffect(() => {
     localStorage.setItem(
       "stanag_last_attempt",
@@ -58,13 +54,11 @@ export default function WritingTestPage() {
     );
   }, [mode, task, textValue, timer, result]);
 
-  // word count
   useEffect(() => {
     const m = textValue.trim().match(/[A-Za-zÀ-ž]+(?:'[A-Za-zÀ-ž]+)?/g);
     setWords(m ? m.length : 0);
   }, [textValue]);
 
-  // timer
   useEffect(() => {
     if (!task) return;
     if (timer <= 0) return;
@@ -78,7 +72,6 @@ export default function WritingTestPage() {
     return `${mm}:${ss}`;
   }, [timer]);
 
-  // start handlers
   function startTask1() {
     const pick = task1Pool[Math.floor(Math.random() * task1Pool.length)];
     setMode("task1");
@@ -101,13 +94,12 @@ export default function WritingTestPage() {
     const r = evaluateSubmission(textValue, task);
     setResult(r);
   }
-
   function handleClear() {
     setTextValue("");
     setResult(null);
   }
 
-  // ===== Auto-evaluate (debounce) =====
+  // Auto-evaluate (debounce)
   const debounceRef = useRef<number | null>(null);
   useEffect(() => {
     if (!task) return;
@@ -120,7 +112,6 @@ export default function WritingTestPage() {
     return () => { if (debounceRef.current) window.clearTimeout(debounceRef.current); };
   }, [textValue, words, task]);
 
-  // ===== UI helpers =====
   const ScoreCard = ({ label, val }: { label: string; val: number }) => {
     const percent = Math.max(0, Math.min(100, val * 10));
     const track = isDark ? "bg-neutral-800" : "bg-neutral-200";
@@ -153,7 +144,6 @@ export default function WritingTestPage() {
         <CardContent className="p-6 grid gap-4">
           <h2 className="text-xl font-semibold">Struktura zkoušky</h2>
           <div className="grid md:grid-cols-2 gap-4">
-            {/* Task 1 */}
             <div className={`rounded-xl p-4 ${cardInner} border ${cardBorder}`}>
               <div className={`text-xs uppercase tracking-wide ${chip} mb-1`}>Task 1</div>
               <div className="font-semibold">
@@ -173,7 +163,6 @@ export default function WritingTestPage() {
               </div>
             </div>
 
-            {/* Task 2 */}
             <div className={`rounded-xl p-4 ${cardInner} border ${cardBorder}`}>
               <div className={`text-xs uppercase tracking-wide ${chip} mb-1`}>Task 2</div>
               <div className="font-semibold">
@@ -216,9 +205,10 @@ export default function WritingTestPage() {
             placeholder="Write your answer here… (formal style, paragraphs, linking words)"
             value={textValue}
             onChange={(e) => setTextValue(e.target.value)}
+            spellCheck={true}
+            lang="en"
           />
 
-          {/* ⚠️ Varování při podlimitu */}
           {task && (
             <div className={`text-sm mt-2 ${isDark ? "text-red-300" : "text-red-600"}`}>
               {words < Math.round((task.minWords ?? 120) * 0.5) && "Text je příliš krátký – skóre je limitováno (max 2/10)."}
@@ -243,7 +233,7 @@ export default function WritingTestPage() {
         <CardContent className="p-6 grid gap-4">
           <h2 className="text-lg font-semibold">Výsledek</h2>
 
-          {!result && <div className={`${chip} text-sm`}>Vyber Task, napiš text a skóre se začne počítat automaticky.</div>}
+          {!result && <div className={`${chip} text-sm`}>Vyber Task, napiš text a skóre se začne počítat automaticky. Pravopisné chyby uvidíš i podtržené v editoru.</div>}
 
           {result && (
             <>
@@ -256,8 +246,25 @@ export default function WritingTestPage() {
 
               <div className="text-sm">
                 Celkem: <span className="font-semibold">{result.total40} / 40</span> ≈ <b>{(result.total40/4).toFixed(1)} / 10</b>
-                <span className={`ml-2 ${chip}`}> (Words: {result.facts.words}, Paragraphs: {result.facts.paragraphs}, Linking: {result.facts.linkingWords})</span>
+                <span className={`ml-2 ${chip}`}>
+                  (Words: {result.facts.words}, Paragraphs: {result.facts.paragraphs}, Linking: {result.facts.linkingWords},
+                  Spelling: {result.facts.spellingErrors})
+                </span>
               </div>
+
+              {result.spelling && result.spelling.length > 0 && (
+                <div>
+                  <h3 className="font-semibold mb-1">Pravopis – doporučené opravy:</h3>
+                  <ul className={`list-disc pl-5 text-sm ${isDark ? "text-neutral-200" : "text-neutral-700"}`}>
+                    {result.spelling.map((s, i) => (
+                      <li key={i}>
+                        <code className="px-1 rounded bg-black/20">{s.word}</code> → <b>{s.suggestion}</b>
+                        {s.count > 1 ? ` (${s.count}×)` : ""}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
 
               <div>
                 <h3 className="font-semibold mb-1">Pokrytí bodů zadání:</h3>
