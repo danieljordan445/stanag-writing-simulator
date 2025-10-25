@@ -1,0 +1,15 @@
+stanag-writing-simulator/
+├── app/
+│   ├── layout.tsx
+│   ├── page.tsx
+│   └── writing-test/
+│       └── page.tsx
+├── components/
+│   └── ui/
+│       ├── button.tsx
+│       └── card.tsx
+├── app/globals.css
+├── package.json
+├── postcss.config.js
+├── tailwind.config.ts
+└── tsconfig.json
