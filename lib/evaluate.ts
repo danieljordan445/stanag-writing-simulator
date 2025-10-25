@@ -1,6 +1,6 @@
 // /lib/evaluate.ts
 import type { WritingTask } from "./tasks"
-import { checkSpelling } from "./spell"
+import { checkSpelling, checkUnknownWords } from "./spell"
 import { checkGrammar, type GrammarIssue } from "./grammar"
 
 export type EvalResult = {
@@ -10,9 +10,12 @@ export type EvalResult = {
   advice: string[]
   facts: {
     words: number; paragraphs: number; linkingWords: number; contractions: number; ttr: number;
-    spellingErrors: number; grammarErrors: number
+    spellingErrors: number; grammarErrors: number; unknownWords: number
   }
   spelling?: { word: string; suggestion: string; count: number }[]
+  spellingTokens?: { word: string; suggestion: string; start: number; end: number }[]
+  unknown?: { word: string; count: number }[]
+  unknownTokens?: { word: string; suggestion: string; start: number; end: number }[]
   grammar?: GrammarIssue[]
 }
 
@@ -21,23 +24,18 @@ const LINKING_WORDS = [
   "for example","for instance","on the other hand","as a result",
   "furthermore","nevertheless","in conclusion","to sum up"
 ]
-
 const FORMAL_CUES = [
   "dear sir or madam","to whom it may concern","i am writing to",
   "yours faithfully","yours sincerely","best regards","regards",
   "introduction","findings","recommendations","conclusion","background","analysis"
 ]
-
 const CONTRACTIONS = [
   "I'm","I've","I'd","I'll","isn't","aren't","don't","doesn't","didn't",
   "won't","can't","couldn't","shouldn't","it's","that's","there's","we're","they're"
 ]
-
 const STOP = new Set(["the","a","an","and","or","to","for","of","in","on","at","with","about","from","is","are","be","as","by","that","this","these","those"])
-
 const clamp = (n: number, min: number, max: number) => Math.max(min, Math.min(max, n))
 
-// počty
 function wordCount(txt: string) {
   const m = txt.trim().match(/[A-Za-zÀ-ž]+(?:'[A-Za-zÀ-ž]+)?/g)
   return m ? m.length : 0
@@ -80,7 +78,8 @@ function pointCovered(textLower: string, point: string) {
   return hits.length>=1
 }
 
-export function evaluateSubmission(txt: string, task: WritingTask): EvalResult {
+/** NOVĚ: volitelné `dict` – offline slovník pro „unknown words“ */
+export function evaluateSubmission(txt: string, task: WritingTask, dict?: Set<string>): EvalResult {
   const words = wordCount(txt)
   const paras = paragraphCount(txt)
   const links = countLinkingWords(txt)
@@ -88,17 +87,20 @@ export function evaluateSubmission(txt: string, task: WritingTask): EvalResult {
   const ttr = typeTokenRatio(txt)
   const lower = txt.toLowerCase()
 
-  // pravopis + gramatika
+  // pravopis + gramatika + unknown words
   const spell = checkSpelling(txt)
   const grammar = checkGrammar(txt)
+  const unknown = checkUnknownWords(txt, dict)
+
   const spellingErrors = spell.total
-  const grammarErrors = grammar.total + spellingErrors // pro škálování bereme obojí
+  const unknownErrors = unknown.total
+  const grammarErrors = grammar.total + spellingErrors + unknownErrors
 
   // coverage
   const coverage = task.points.map(p => ({ id: p.id, text: p.text, covered: pointCovered(lower, p.text) }))
   const coveredCount = coverage.filter(c => c.covered).length
 
-  // tvrdé limity délky
+  // délkové limity
   const fiftyPct = Math.round(task.minWords * 0.5)
   const seventyPct = Math.round(task.minWords * 0.7)
   if (words < 5) {
@@ -108,8 +110,11 @@ export function evaluateSubmission(txt: string, task: WritingTask): EvalResult {
       total50: 0,
       coverage,
       advice: ["Napiš text – aktuálně není co hodnotit.", `Cíl: alespoň ${task.minWords} slov.`],
-      facts: { words, paragraphs: paras, linkingWords: links, contractions, ttr: Number(ttr.toFixed(2)), spellingErrors, grammarErrors },
+      facts: { words, paragraphs: paras, linkingWords: links, contractions, ttr: Number(ttr.toFixed(2)), spellingErrors, grammarErrors, unknownWords: unknownErrors },
       spelling: spell.issues,
+      spellingTokens: spell.tokens,
+      unknown: unknown.issues,
+      unknownTokens: unknown.tokens,
       grammar: grammar.issues
     }
   }
@@ -119,7 +124,7 @@ export function evaluateSubmission(txt: string, task: WritingTask): EvalResult {
 
   const formality = FORMAL_CUES.reduce((s,c)=>s+(lower.includes(c)?1:0),0)
 
-  // LANGUAGE (lexikální bohatost + linking, už bez pravopisu – ten je v „Grammar“)
+  // LANGUAGE (bez pravopisu – ten je v Grammar)
   let language = 0
   if (ttr >= 0.30) language += 2
   if (ttr >= 0.50) language += 2
@@ -129,7 +134,7 @@ export function evaluateSubmission(txt: string, task: WritingTask): EvalResult {
   if (contractions === 0) language += 1
   language = clamp(language, 0, 10)
 
-  // FORM (formát a požadavky)
+  // FORM
   let form = 0
   if (formality >= 1) form += 2
   if (formality >= 3) form += 1
@@ -154,22 +159,15 @@ export function evaluateSubmission(txt: string, task: WritingTask): EvalResult {
   if (coveredCount < task.points.length) effect -= 1
   effect = clamp(effect, 0, 10)
 
-  // GRAMMAR & MECHANICS (pravopis + pravidla)
-  // přepočet podle hustoty chyb: cca -1 bod za každé ~3 chyby / 100 slov (s limitem)
+  // GRAMMAR & MECHANICS – zahrnuje spelling + unknown
   const errorsPer100 = (grammarErrors / Math.max(1, words)) * 100
-  let grammarScore = 10 - Math.ceil(errorsPer100 / 3) // přísnější škála
-  // navíc minus za vážnější chyby (začátek věty malým písmenem, chybějící tečky)
+  let grammarScore = 10 - Math.ceil(errorsPer100 / 3)
   const severe = grammar.issues.filter(i => i.type === "sentenceStartLower" || i.type === "missingEndPunctuation").reduce((s,i)=>s+i.count,0)
-  grammarScore -= Math.min(3, severe) // max -3
+  grammarScore -= Math.min(3, severe)
   grammarScore = clamp(grammarScore, 0, 10)
 
-  // coverage cap
-  if (coveredCount < task.points.length) {
-    organisation = Math.min(organisation, 7)
-    effect = Math.min(effect, 7)
-  }
-
-  // délkové capy
+  // caps
+  if (coveredCount < task.points.length) { organisation = Math.min(organisation, 7); effect = Math.min(effect, 7) }
   language = Math.min(language, hardCap)
   form = Math.min(form, hardCap)
   organisation = Math.min(organisation, hardCap)
@@ -189,9 +187,8 @@ export function evaluateSubmission(txt: string, task: WritingTask): EvalResult {
   if (links < 3) advice.push("Přidej více linking words (Firstly, However, Therefore, For example…).")
   if (contractions > 0) advice.push("Vyhni se kontrakcím (don't, won't…) – drž formální styl.")
   if (paras < 3) advice.push("Rozděl text do minimálně tří odstavců s topic sentences.")
-  if (grammarErrors > 0) {
-    advice.push("Oprav gramatické a pravopisné chyby (viz seznam níže).")
-  }
+  if (unknownErrors > 0) advice.push("Zkontroluj zvýrazněná neznámá slova – pravděpodobně jde o překlepy nebo chybné tvary.")
+  if (spellingErrors > 0) advice.push("Oprav běžné překlepy (viz seznam).")
   if (task.type === "letter" || task.type === "email") advice.push("Použij formální úvod a závěr (Dear Sir or Madam…, Yours faithfully…).")
   if (task.type === "report") advice.push("Použij nadpisy/sekce (Introduction, Findings/Analysis, Conclusion/Recommendations).")
 
@@ -201,10 +198,13 @@ export function evaluateSubmission(txt: string, task: WritingTask): EvalResult {
     coverage,
     advice,
     facts: {
-      words, paragraphs: paras, linkingWords: links, contractions,
-      ttr: Number(ttr.toFixed(2)), spellingErrors, grammarErrors
+      words, paragraphs: paras, linkingWords: links, contractions, ttr: Number(ttr.toFixed(2)),
+      spellingErrors, grammarErrors, unknownWords: unknownErrors
     },
     spelling: spell.issues,
+    spellingTokens: spell.tokens,
+    unknown: unknown.issues,
+    unknownTokens: unknown.tokens,
     grammar: grammar.issues
   }
 }
