@@ -1,12 +1,14 @@
 // /lib/evaluate.ts
 import type { WritingTask } from "./tasks"
+import { checkSpelling } from "./spell"
 
 export type EvalResult = {
   scores: { language: number; form: number; organisation: number; effect: number }
   total40: number
   coverage: { id: string; text: string; covered: boolean }[]
   advice: string[]
-  facts: { words: number; paragraphs: number; linkingWords: number; contractions: number; ttr: number }
+  facts: { words: number; paragraphs: number; linkingWords: number; contractions: number; ttr: number; spellingErrors: number }
+  spelling?: { word: string; suggestion: string; count: number }[]
 }
 
 const LINKING_WORDS = [
@@ -29,55 +31,40 @@ const CONTRACTIONS = [
 const STOP = new Set(["the","a","an","and","or","to","for","of","in","on","at","with","about","from","is","are","be","as","by","that","this","these","those"]);
 
 function clamp(n: number, min: number, max: number) { return Math.max(min, Math.min(max, n)); }
-
-// — počty —
-function wordCount(txt: string) {
-  const m = txt.trim().match(/[A-Za-zÀ-ž]+(?:'[A-Za-zÀ-ž]+)?/g);
-  return m ? m.length : 0;
-}
+function wordCount(txt: string) { const m = txt.trim().match(/[A-Za-zÀ-ž]+(?:'[A-Za-zÀ-ž]+)?/g); return m ? m.length : 0; }
 function paragraphCount(txt: string) {
-  const blocks = txt
-    .split(/\r?\n/)
-    .map(s => s.trim())
-    .reduce<string[]>((acc, line) => {
-      if (line === "") acc.push(""); else acc[acc.length - 1] = (acc[acc.length - 1] || "") + "\n" + line;
-      return acc;
-    }, [""])
-    .filter(b => b.trim().length > 0);
-  if (blocks.length === 0 && txt.trim().length > 0) return 1;
-  return blocks.length;
+  const blocks = txt.split(/\r?\n/).map(s=>s.trim()).reduce<string[]>((acc,l)=>{
+    if (l === "") acc.push(""); else acc[acc.length-1]=(acc[acc.length-1]||"")+"\n"+l; return acc;
+  },[""]).filter(b=>b.trim().length>0);
+  if (blocks.length===0 && txt.trim().length>0) return 1; return blocks.length;
 }
 function countLinkingWords(txt: string) {
   const t = " " + txt.toLowerCase() + " ";
   let count = 0;
-  LINKING_WORDS.forEach(w => {
-    if (w.includes(" ")) {
-      if (t.includes(" " + w + " ")) count++;
-    } else {
-      const re = new RegExp(`\\b${w}\\b`, "g");
-      if (t.match(re)) count++;
-    }
+  LINKING_WORDS.forEach(w=>{
+    if (w.includes(" ")) { if (t.includes(" "+w+" ")) count++; }
+    else { const re=new RegExp(`\\b${w}\\b`,"g"); if (t.match(re)) count++; }
   });
   return count;
 }
 function countContractions(txt: string) {
-  const re = new RegExp(CONTRACTIONS.map(c => c.replace(/[-/\\^$*+?.()|[\]{}]/g, '\\$&')).join("|"), "gi");
+  const re = new RegExp(CONTRACTIONS.map(c=>c.replace(/[-/\\^$*+?.()|[\]{}]/g,'\\$&')).join("|"),"gi");
   return txt.match(re)?.length ?? 0;
 }
 function typeTokenRatio(txt: string) {
   const tokens = (txt.toLowerCase().match(/[a-zà-ž]+(?:'[a-zà-ž]+)?/gi) || []).filter(Boolean);
-  if (tokens.length === 0) return 0;
+  if (tokens.length===0) return 0;
   const types = new Set(tokens);
   return types.size / tokens.length;
 }
 function pointCovered(textLower: string, point: string) {
-  const words = point.toLowerCase().split(/[^\p{L}]+/u).filter(w => w && !STOP.has(w));
-  if (words.length === 0) return false;
+  const words = point.toLowerCase().split(/[^\p{L}]+/u).filter(w=>w && !STOP.has(w));
+  if (words.length===0) return false;
   const uniq = Array.from(new Set(words));
-  const hits = uniq.filter(w => textLower.includes(w));
-  if (uniq.length >= 3) return hits.length >= 2;
-  if (uniq.length === 2) return hits.length >= 1;
-  return hits.length >= 1;
+  const hits = uniq.filter(w=>textLower.includes(w));
+  if (uniq.length>=3) return hits.length>=2;
+  if (uniq.length===2) return hits.length>=1;
+  return hits.length>=1;
 }
 
 export function evaluateSubmission(txt: string, task: WritingTask): EvalResult {
@@ -88,16 +75,18 @@ export function evaluateSubmission(txt: string, task: WritingTask): EvalResult {
   const ttr = typeTokenRatio(txt);
   const lower = txt.toLowerCase();
 
+  // kontrola pravopisu
+  const spell = checkSpelling(txt);
+  const spellingErrors = spell.total;
+
   const coverage = task.points.map(p => ({
     id: p.id, text: p.text, covered: pointCovered(lower, p.text)
   }));
   const coveredCount = coverage.filter(c => c.covered).length;
 
-  // ---- TVRDÉ LIMITY PODLE DÉLKY ----
   const fiftyPct = Math.round(task.minWords * 0.5);
   const seventyPct = Math.round(task.minWords * 0.7);
 
-  // 0) Prakticky bez textu → nula
   if (words < 5) {
     const scores = { language: 0, form: 0, organisation: 0, effect: 0 };
     return {
@@ -106,31 +95,31 @@ export function evaluateSubmission(txt: string, task: WritingTask): EvalResult {
         "Napiš text – aktuálně není co hodnotit.",
         `Cíl: alespoň ${task.minWords} slov.`
       ],
-      facts: { words, paragraphs: paras, linkingWords: links, contractions, ttr: Number(ttr.toFixed(2)) }
+      facts: { words, paragraphs: paras, linkingWords: links, contractions, ttr: Number(ttr.toFixed(2)), spellingErrors },
+      spelling: spell.issues
     };
   }
 
-  // 1) <50 % minima → max 2/10 v každé kategorii
   let hardCap = 10;
   if (words < fiftyPct) hardCap = 2;
-  // 2) 50–70 % minima → max 4/10
   else if (words < seventyPct) hardCap = 4;
 
-  // ===== ZÁKLADNÍ VÝPOČTY =====
-  const formality = FORMAL_CUES.reduce((s, cue) => s + (lower.includes(cue) ? 1 : 0), 0);
+  const formality = FORMAL_CUES.reduce((s,c)=>s+(lower.includes(c)?1:0),0);
 
-  // LANGUAGE – TTR + linking + kontrakce
+  // ===== LANGUAGE =====
   let language = 0;
   if (ttr >= 0.30) language += 2;
   if (ttr >= 0.50) language += 2;
   if (ttr >= 0.65) language += 1;
   if (links >= 2) language += 1;
   if (links >= 4) language += 1;
-  if (contractions === 0) language += 2;
-  else if (contractions >= 2) language -= 1;
+  if (contractions === 0) language += 2; else if (contractions >= 2) language -= 1;
+
+  // snížení za pravopisné chyby (max -3 body)
+  language -= Math.min(3, Math.ceil(spellingErrors / 2));
   language = clamp(language, 0, 10);
 
-  // FORM – formální znaky + splnění minima
+  // ===== FORM =====
   let form = 0;
   if (formality >= 1) form += 2;
   if (formality >= 3) form += 1;
@@ -139,7 +128,7 @@ export function evaluateSubmission(txt: string, task: WritingTask): EvalResult {
   if (contractions === 0) form += 1; else if (contractions >= 3) form -= 1;
   form = clamp(form, 0, 10);
 
-  // ORGANISATION – odstavce + linking + coverage
+  // ===== ORGANISATION =====
   let organisation = 0;
   if (paras >= 2) organisation += 2;
   if (paras >= 3) organisation += 2;
@@ -147,7 +136,7 @@ export function evaluateSubmission(txt: string, task: WritingTask): EvalResult {
   if (coveredCount === task.points.length) organisation += 3;
   organisation = clamp(organisation, 0, 10);
 
-  // EFFECT – dojem + formálnost + délka
+  // ===== EFFECT =====
   let effect = 0;
   if (formality >= 2) effect += 2;
   if (paras >= 3) effect += 1;
@@ -155,13 +144,12 @@ export function evaluateSubmission(txt: string, task: WritingTask): EvalResult {
   if (coveredCount < task.points.length) effect -= 1;
   effect = clamp(effect, 0, 10);
 
-  // Globální omezení, pokud nejsou pokryty body zadání
   if (coveredCount < task.points.length) {
     organisation = Math.min(organisation, 7);
     effect = Math.min(effect, 7);
   }
 
-  // Uplatni cap podle délky
+  // délkové limity
   language = Math.min(language, hardCap);
   form = Math.min(form, hardCap);
   organisation = Math.min(organisation, hardCap);
@@ -180,6 +168,10 @@ export function evaluateSubmission(txt: string, task: WritingTask): EvalResult {
   if (links < 3) advice.push("Přidej více linking words (Firstly, However, Therefore, For example…).");
   if (contractions > 0) advice.push("Vyhni se kontrakcím (don't, won't…) – drž formální styl.");
   if (paras < 3) advice.push("Rozděl text do minimálně tří odstavců s topic sentences.");
+  if (spellingErrors > 0) {
+    const items = spell.issues.slice(0, 5).map(i => `${i.word} → ${i.suggestion}${i.count > 1 ? ` (${i.count}×)` : ""}`).join("; ");
+    advice.push(`Zkontroluj pravopis: ${items}${spell.issues.length > 5 ? "…" : ""}`);
+  }
   if (task.type === "letter" || task.type === "email") advice.push("Použij formální úvod a závěr (Dear Sir or Madam…, Yours faithfully…).");
   if (task.type === "report") advice.push("Použij nadpisy/sekce (Introduction, Findings/Analysis, Conclusion/Recommendations).");
 
@@ -188,6 +180,7 @@ export function evaluateSubmission(txt: string, task: WritingTask): EvalResult {
     total40,
     coverage,
     advice,
-    facts: { words, paragraphs: paras, linkingWords: links, contractions, ttr: Number(ttr.toFixed(2)) },
+    facts: { words, paragraphs: paras, linkingWords: links, contractions, ttr: Number(ttr.toFixed(2)), spellingErrors },
+    spelling: spell.issues
   };
 }
