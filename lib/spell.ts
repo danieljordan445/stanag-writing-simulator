@@ -1,19 +1,23 @@
 // /lib/spell.ts
-// Lehká kontrola pravopisu: detekuje nejčastější anglické překlepy
-// a nabídne opravy. Běžné i britské/americké varianty jsou v pořádku.
+// Pravopis: (A) běžné překlepy se známou opravou, (B) "unknown words" dle offline slovníku.
+// Vrací i tokeny s přesnými pozicemi pro zvýraznění v editoru.
 
 export type SpellIssue = { word: string; suggestion: string; count: number };
+export type MissToken = { word: string; suggestion: string; start: number; end: number };
 
-const COMMON_MISSPELLINGS: Record<string, string> = {
-  // very common
+export const COMMON_MISSPELLINGS: Record<string, string> = {
   recieve: "receive",
   recieveed: "received",
   seperate: "separate",
   definately: "definitely",
   occured: "occurred",
   ocurrence: "occurrence",
+  occurence: "occurrence",
   adress: "address",
+  adressing: "addressing",
+  adressed: "addressed",
   accomodation: "accommodation",
+  accomodate: "accommodate",
   acheive: "achieve",
   beleive: "believe",
   calender: "calendar",
@@ -33,6 +37,7 @@ const COMMON_MISSPELLINGS: Record<string, string> = {
   prefered: "preferred",
   recomend: "recommend",
   recomendation: "recommendation",
+  recomendations: "recommendations",
   responsability: "responsibility",
   seperateley: "separately",
   succesful: "successful",
@@ -41,7 +46,6 @@ const COMMON_MISSPELLINGS: Record<string, string> = {
   writting: "writing",
   thier: "their",
   teh: "the",
-  occurence: "occurrence",
   embarass: "embarrass",
   embarassment: "embarrassment",
   millenium: "millennium",
@@ -49,11 +53,6 @@ const COMMON_MISSPELLINGS: Record<string, string> = {
   publically: "publicly",
   arguement: "argument",
   concensus: "consensus",
-  adressing: "addressing",
-  adressed: "addressed",
-  recomendations: "recommendations",
-  accomodate: "accommodate",
-  acquitence: "acquaintance",
   manouver: "manoeuvre",
   persue: "pursue",
   persuit: "pursuit",
@@ -63,22 +62,28 @@ const COMMON_MISSPELLINGS: Record<string, string> = {
   maintanance: "maintenance",
 };
 
-// Slova ignorovaná při kontrole (zkratky, zkratky jednotek apod.)
-const IGNORE = new Set([
-  "usa","uk","eu","nato","hq","faq","id","ok","gps","pdf",
-]);
+const IGNORE = new Set(["usa","uk","eu","nato","hq","faq","id","ok","gps","pdf"]);
 
 const WORD_RE = /[A-Za-z]+(?:'[A-Za-z]+)?/g;
 
-export function checkSpelling(text: string): { issues: SpellIssue[]; total: number } {
+/** A) Běžné překlepy se známou opravou */
+export function checkSpelling(text: string): {
+  issues: SpellIssue[];
+  total: number;
+  tokens: MissToken[];
+} {
   const counts: Record<string, number> = {};
-  const lower = text.toLowerCase();
-  const tokens = lower.match(WORD_RE) || [];
+  const tokens: MissToken[] = [];
 
-  for (const w of tokens) {
-    if (IGNORE.has(w)) continue;
-    if (COMMON_MISSPELLINGS[w]) {
-      counts[w] = (counts[w] || 0) + 1;
+  let m: RegExpExecArray | null;
+  while ((m = WORD_RE.exec(text)) !== null) {
+    const word = m[0];
+    const lw = word.toLowerCase();
+    if (IGNORE.has(lw)) continue;
+    const suggestion = COMMON_MISSPELLINGS[lw];
+    if (suggestion) {
+      counts[lw] = (counts[lw] || 0) + 1;
+      tokens.push({ word, suggestion, start: m.index, end: m.index + word.length });
     }
   }
 
@@ -87,5 +92,47 @@ export function checkSpelling(text: string): { issues: SpellIssue[]; total: numb
     .sort((a, b) => b.count - a.count);
 
   const total = issues.reduce((s, i) => s + i.count, 0);
-  return { issues, total };
+  return { issues, total, tokens };
+}
+
+/** B) Unknown words – vše, co není ve slovníku (case-insensitive) */
+export function checkUnknownWords(text: string, dict?: Set<string>): {
+  issues: { word: string; count: number }[];
+  total: number;
+  tokens: MissToken[];
+} {
+  if (!dict) return { issues: [], total: 0, tokens: [] };
+
+  const counts: Record<string, number> = {};
+  const tokens: MissToken[] = [];
+
+  let m: RegExpExecArray | null;
+  while ((m = WORD_RE.exec(text)) !== null) {
+    const raw = m[0];
+    const lw = raw.toLowerCase();
+
+    // ignoruj zkratky a velmi krátké tokeny (2 a méně), čísla, a známé překlepy (ty řeší checkSpelling)
+    if (lw.length <= 2) continue;
+    if (IGNORE.has(lw)) continue;
+    if (/^\d+$/.test(lw)) continue;
+    if (COMMON_MISSPELLINGS[lw]) continue;
+
+    // povol kapitalizovaná vlastní jména na začátku věty (heuristika)
+    const prevChar = m.index > 0 ? text[m.index - 1] : " ";
+    const isSentenceStart = /[.!?]\s$/.test(text.slice(0, m.index)) || m.index === 0;
+    const looksProperNoun = /^[A-Z]/.test(raw);
+    if (looksProperNoun && isSentenceStart) {
+      // začátek věty: velké písmeno je v pořádku, ale zkontroluj slovo bez case
+      if (dict.has(lw)) continue;
+    }
+
+    if (!dict.has(lw)) {
+      counts[lw] = (counts[lw] || 0) + 1;
+      tokens.push({ word: raw, suggestion: "(check spelling)", start: m.index, end: m.index + raw.length });
+    }
+  }
+
+  const issues = Object.entries(counts).map(([word, count]) => ({ word, count })).sort((a,b)=>b.count-a.count);
+  const total = issues.reduce((s,i)=>s+i.count,0);
+  return { issues, total, tokens };
 }
