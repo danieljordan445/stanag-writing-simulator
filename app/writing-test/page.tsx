@@ -34,7 +34,7 @@ export default function WritingTestPage() {
   const [task, setTask] = useState<WritingTask | null>(null);
   const [textValue, setTextValue] = useState("");
   const [words, setWords] = useState(0);
-  const [timer, setTimer] = useState(80 * 60); // 80 minutes in seconds
+  const [timer, setTimer] = useState(80 * 60); // 80 minutes
   const [result, setResult] = useState<EvalResult | null>(null);
 
   // load previous attempt
@@ -66,7 +66,7 @@ export default function WritingTestPage() {
 
   // timer
   useEffect(() => {
-    if (!task) return; // neběží mimo aktivní task
+    if (!task) return;
     if (timer <= 0) return;
     const id = setInterval(() => setTimer((t) => t - 1), 1000);
     return () => clearInterval(id);
@@ -110,13 +110,13 @@ export default function WritingTestPage() {
   // ===== Auto-evaluate (debounce) =====
   const debounceRef = useRef<number | null>(null);
   useEffect(() => {
-    if (!task) return;             // bez tasku nevyhodnocujeme
+    if (!task) return;
     if (words === 0) { setResult(null); return; }
     if (debounceRef.current) window.clearTimeout(debounceRef.current);
     debounceRef.current = window.setTimeout(() => {
       const r = evaluateSubmission(textValue, task);
       setResult(r);
-    }, 600); // 600 ms po dopsání
+    }, 600);
     return () => { if (debounceRef.current) window.clearTimeout(debounceRef.current); };
   }, [textValue, words, task]);
 
@@ -212,13 +212,20 @@ export default function WritingTestPage() {
           )}
 
           <textarea
-            className={`w-full h-64 p-4 rounded-xl border focus:ring-2 ${areaBg} ${
-              isDark ? "focus:ring-white" : "focus:ring-black"
-            }`}
+            className={`w-full h-64 p-4 rounded-xl border focus:ring-2 ${areaBg} ${isDark ? "focus:ring-white" : "focus:ring-black"}`}
             placeholder="Write your answer here… (formal style, paragraphs, linking words)"
             value={textValue}
             onChange={(e) => setTextValue(e.target.value)}
           />
+
+          {/* ⚠️ Varování při podlimitu */}
+          {task && (
+            <div className={`text-sm mt-2 ${isDark ? "text-red-300" : "text-red-600"}`}>
+              {words < Math.round((task.minWords ?? 120) * 0.5) && "Text je příliš krátký – skóre je limitováno (max 2/10)."}
+              {words >= Math.round((task.minWords ?? 120) * 0.5) && words < Math.round((task.minWords ?? 120) * 0.7) && "Text je pod 70 % minima – skóre je limitováno (max 4/10)."}
+            </div>
+          )}
+
           <div className={`flex flex-wrap items-center justify-between gap-3 text-xs ${subText}`}>
             <div>
               <b>Checklist:</b> cover all 3 points · use ≥3 linking words · formal style · topic sentences · meet word limit
