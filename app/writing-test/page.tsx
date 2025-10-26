@@ -10,6 +10,7 @@ import { evaluateSubmission, type EvalResult } from "@/lib/evaluate";
 import { proof } from "@/lib/proof";
 
 type Mode = "idle" | "task1" | "task2";
+type Lang = "en-GB" | "en-US";
 
 // HTML escape pro bezpečné zvýraznění
 function escapeHtml(s: string) {
@@ -18,7 +19,8 @@ function escapeHtml(s: string) {
 function buildHighlightedHTML(text: string, tokens: { start: number; end: number }[]) {
   if (!tokens.length) return escapeHtml(text);
   const sorted = [...tokens].sort((a, b) => a.start - b.start);
-  let i = 0, out = "";
+  let i = 0;
+  let out = "";
   for (const t of sorted) {
     if (t.start < i) continue; // překryvy ignoruj
     out += escapeHtml(text.slice(i, t.start));
@@ -53,29 +55,28 @@ export default function WritingTestPage() {
   const [words, setWords] = useState(0);
   const [timer, setTimer] = useState(80 * 60);
   const [result, setResult] = useState<EvalResult | null>(null);
+  const [lang, setLang] = useState<Lang>("en-GB"); // přepínač jazyka
 
   // live highlight tokeny z LanguageTool
   const [liveTokens, setLiveTokens] = useState<{ start: number; end: number }[]>([]);
-  const highlightedHTML = useMemo(
-    () => buildHighlightedHTML(textValue, liveTokens),
-    [textValue, liveTokens]
-  );
+  const highlightedHTML = useMemo(() => buildHighlightedHTML(textValue, liveTokens), [textValue, liveTokens]);
 
-  // persist
+  // persist (včetně jazyka)
   useEffect(() => {
     const saved = localStorage.getItem("stanag_last_attempt");
     if (saved) {
       const data = JSON.parse(saved);
       setTextValue(data.text || "");
-      setMode(data.mode || "idle");
+      setMode((data.mode as Mode) || "idle");
       setTimer(typeof data.timer === "number" ? data.timer : 80 * 60);
-      if (data.task) setTask(data.task);
-      if (data.result) setResult(data.result);
+      if (data.task) setTask(data.task as WritingTask);
+      if (data.result) setResult(data.result as EvalResult);
+      if (data.lang === "en-GB" || data.lang === "en-US") setLang(data.lang as Lang);
     }
   }, []);
   useEffect(() => {
-    localStorage.setItem("stanag_last_attempt", JSON.stringify({ mode, task, text: textValue, timer, result }));
-  }, [mode, task, textValue, timer, result]);
+    localStorage.setItem("stanag_last_attempt", JSON.stringify({ mode, task, text: textValue, timer, result, lang }));
+  }, [mode, task, textValue, timer, result, lang]);
 
   useEffect(() => {
     const m = textValue.trim().match(/[A-Za-zÀ-ž]+(?:'[A-Za-zÀ-ž]+)?/g);
@@ -83,9 +84,10 @@ export default function WritingTestPage() {
   }, [textValue]);
 
   useEffect(() => {
-    if (!task) return; if (timer <= 0) return;
-    const id = setInterval(() => setTimer((t) => t - 1), 1000);
-    return () => clearInterval(id);
+    if (!task) return;
+    if (timer <= 0) return;
+    const id = window.setInterval(() => setTimer((t) => t - 1), 1000);
+    return () => window.clearInterval(id);
   }, [timer, task]);
 
   const displayTime = useMemo(() => {
@@ -96,42 +98,61 @@ export default function WritingTestPage() {
 
   function startTask1() {
     const pick = task1Pool[Math.floor(Math.random() * task1Pool.length)];
-    setMode("task1"); setTask(pick); setTextValue(""); setResult(null); setTimer(80 * 60); setLiveTokens([]);
+    setMode("task1");
+    setTask(pick);
+    setTextValue("");
+    setResult(null);
+    setTimer(80 * 60);
+    setLiveTokens([]);
   }
   function startTask2() {
     const pick = task2Options[Math.floor(Math.random() * task2Options.length)];
-    setMode("task2"); setTask(pick); setTextValue(""); setResult(null); setTimer(80 * 60); setLiveTokens([]);
+    setMode("task2");
+    setTask(pick);
+    setTextValue("");
+    setResult(null);
+    setTimer(80 * 60);
+    setLiveTokens([]);
   }
 
   async function handleEvaluate() {
     if (!task) return;
-    const r = await evaluateSubmission(textValue, task, { language: "en-GB" });
+    const r = await evaluateSubmission(textValue, task, { language: lang });
     setResult(r);
-    // při finálním hodnocení převezmeme žluté tokeny z výsledku (přesnější než debounce)
     setLiveTokens(r.spellingTokens || []);
   }
-  function handleClear() { setTextValue(""); setResult(null); setLiveTokens([]); }
+  function handleClear() {
+    setTextValue("");
+    setResult(null);
+    setLiveTokens([]);
+  }
 
   // ==== Live LanguageTool highlight s debounce ====
   const debounceRef = useRef<number | null>(null);
   const inflightRef = useRef<number>(0);
 
   useEffect(() => {
-    if (!task) { setLiveTokens([]); return; }
-    // prázdný text = žádná kontrola
-    if (!textValue || textValue.trim().length === 0) { setLiveTokens([]); return; }
+    if (!task) {
+      setLiveTokens([]);
+      return;
+    }
+    if (!textValue || textValue.trim().length === 0) {
+      setLiveTokens([]);
+      return;
+    }
 
     if (debounceRef.current) window.clearTimeout(debounceRef.current);
     debounceRef.current = window.setTimeout(async () => {
       const id = ++inflightRef.current;
-      const res = await proof(textValue, { language: "en-GB" });
-      if (id !== inflightRef.current) return; // příchozí starší výsledek zahoď
+      const res = await proof(textValue, { language: lang });
+      if (id !== inflightRef.current) return; // starší výsledek zahoď
       setLiveTokens(res.tokensForHighlight);
-      // lehké auto-hodnocení bez psaní do result (necháme až na Evaluate)
     }, 600);
 
-    return () => { if (debounceRef.current) window.clearTimeout(debounceRef.current); };
-  }, [textValue, task]);
+    return () => {
+      if (debounceRef.current) window.clearTimeout(debounceRef.current);
+    };
+  }, [textValue, task, lang]);
 
   const ScoreCard = ({ label, val }: { label: string; val: number }) => {
     const percent = Math.max(0, Math.min(100, val * 10));
@@ -164,13 +185,59 @@ export default function WritingTestPage() {
   const editorText = isDark ? "text-white" : "text-black";
   const focusRing = isDark ? "focus:ring-white" : "focus:ring-black";
 
+  // Segmented toggle pro volbu jazyka (EN-GB / EN-US)
+  const LangToggle = () => {
+    return (
+      <div className="inline-flex items-center gap-2">
+        <span className={`text-xs ${chip}`}>Language</span>
+        <div className={`inline-flex rounded-lg overflow-hidden border ${cardBorder}`}>
+          <button
+            type="button"
+            onClick={() => setLang("en-GB")}
+            aria-pressed={lang === "en-GB"}
+            className={`px-3 py-1 text-xs ${
+              lang === "en-GB"
+                ? isDark
+                  ? "bg-white text-black"
+                  : "bg-black text-white"
+                : isDark
+                ? "bg-neutral-900 text-neutral-200"
+                : "bg-neutral-100 text-neutral-700"
+            }`}
+          >
+            EN-GB
+          </button>
+          <button
+            type="button"
+            onClick={() => setLang("en-US")}
+            aria-pressed={lang === "en-US"}
+            className={`px-3 py-1 text-xs ${
+              lang === "en-US"
+                ? isDark
+                  ? "bg-white text-black"
+                  : "bg-black text-white"
+                : isDark
+                ? "bg-neutral-900 text-neutral-200"
+                : "bg-neutral-100 text-neutral-700"
+            }`}
+          >
+            EN-US
+          </button>
+        </div>
+      </div>
+    );
+  };
+
   return (
     <div className={`max-w-5xl mx-auto px-4 py-8 grid gap-8 ${text} ${bg} min-h-screen`}>
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-3">
         <motion.h1 className="text-3xl font-bold tracking-tight">STANAG Writing Test Simulator</motion.h1>
-        <button onClick={() => setIsDark(v => !v)} className={`${btnPrimary} px-3 py-1 rounded-lg`}>
-          {isDark ? "Light mode" : "Dark mode"}
-        </button>
+        <div className="flex items-center gap-2">
+          <LangToggle />
+          <button onClick={() => setIsDark((v) => !v)} className={`${btnPrimary} px-3 py-1 rounded-lg`}>
+            {isDark ? "Light mode" : "Dark mode"}
+          </button>
+        </div>
       </div>
 
       {/* ===== Struktura zkoušky ===== */}
@@ -192,7 +259,9 @@ export default function WritingTestPage() {
                 <li>Cover all 3 points from the prompt</li>
               </ul>
               <div className="mt-3">
-                <Button className={`${btnPrimary}`} onClick={startTask1}>Start Task 1 (random)</Button>
+                <Button className={`${btnPrimary}`} onClick={startTask1}>
+                  Start Task 1 (random)
+                </Button>
               </div>
             </div>
 
@@ -205,7 +274,9 @@ export default function WritingTestPage() {
                 Choose <b>one</b> of two topics and write a report with clear headings/paragraphs.
               </p>
               <div className="mt-3">
-                <Button className={`${btnPrimary}`} onClick={startTask2}>Start Task 2 (random)</Button>
+                <Button className={`${btnPrimary}`} onClick={startTask2}>
+                  Start Task 2 (random)
+                </Button>
               </div>
             </div>
           </div>
@@ -217,8 +288,12 @@ export default function WritingTestPage() {
       <Card className={`${cardBg} ${cardBorder} ${text}`}>
         <CardContent className="p-6 grid gap-4">
           <div className={`flex flex-wrap justify-between items-center text-sm ${subText} gap-2`}>
-            <div>Min. {task?.minWords ?? 120} / 200 words · Timer: <span className="font-mono">{displayTime}</span></div>
-            <div>Words: <span className="font-semibold">{words}</span></div>
+            <div>
+              Min. {task?.minWords ?? 120} / 200 words · Timer: <span className="font-mono">{displayTime}</span>
+            </div>
+            <div>
+              Words: <span className="font-semibold">{words}</span>
+            </div>
           </div>
 
           {task && (
@@ -226,7 +301,9 @@ export default function WritingTestPage() {
               <div className="text-sm font-semibold mb-1">{task.label}</div>
               <div className="text-sm">{task.instruction}</div>
               <ul className={`list-disc pl-5 text-sm mt-2 ${isDark ? "text-neutral-200" : "text-neutral-700"}`}>
-                {task.points.map(p => (<li key={p.id}>{p.text}</li>))}
+                {task.points.map((p) => (
+                  <li key={p.id}>{p.text}</li>
+                ))}
               </ul>
             </div>
           )}
@@ -246,11 +323,7 @@ export default function WritingTestPage() {
               placeholder="Write your answer here… (formal style, paragraphs, linking words)"
               value={textValue}
               onChange={(e) => setTextValue(e.target.value)}
-              onScroll={() => {
-                if (!preRef.current || !taRef.current) return;
-                preRef.current.scrollTop = taRef.current.scrollTop;
-                preRef.current.scrollLeft = taRef.current.scrollLeft;
-              }}
+              onScroll={onScrollSync}
               spellCheck={false} // necháme kontrolu čistě na LT, aby se "netloukla" s prohlížečem
               lang="en"
               style={{ lineHeight: "1.625" }}
@@ -261,15 +334,23 @@ export default function WritingTestPage() {
           {task && (
             <div className={`text-sm mt-2 ${isDark ? "text-red-300" : "text-red-600"}`}>
               {words < Math.round((task.minWords ?? 120) * 0.5) && "Text je příliš krátký – skóre je limitováno (max 2/10)."}
-              {words >= Math.round((task.minWords ?? 120) * 0.5) && words < Math.round((task.minWords ?? 120) * 0.7) && "Text je pod 70 % minima – skóre je limitováno (max 4/10)."}
+              {words >= Math.round((task.minWords ?? 120) * 0.5) &&
+                words < Math.round((task.minWords ?? 120) * 0.7) &&
+                "Text je pod 70 % minima – skóre je limitováno (max 4/10)."}
             </div>
           )}
 
           <div className={`flex flex-wrap items-center justify-between gap-3 text-xs ${subText}`}>
-            <div><b>Checklist:</b> cover all 3 points · use ≥3 linking words · formal style · topic sentences · meet word limit</div>
+            <div>
+              <b>Checklist:</b> cover all 3 points · use ≥3 linking words · formal style · topic sentences · meet word limit
+            </div>
             <div className="flex gap-3">
-              <Button className={`${btnOutline}`} onClick={handleClear}>Clear</Button>
-              <Button className={`${btnPrimary}`} onClick={handleEvaluate} disabled={!task || words === 0}>Evaluate</Button>
+              <Button className={`${btnOutline}`} onClick={handleClear}>
+                Clear
+              </Button>
+              <Button className={`${btnPrimary}`} onClick={handleEvaluate} disabled={!task || words === 0}>
+                Evaluate
+              </Button>
             </div>
           </div>
         </CardContent>
@@ -280,7 +361,11 @@ export default function WritingTestPage() {
         <CardContent className="p-6 grid gap-4">
           <h2 className="text-lg font-semibold">Výsledek</h2>
 
-          {!result && <div className={`${chip} text-sm`}>Piš do editoru – chybné pasáže uvidíš žlutě. Klikni Evaluate pro detailní rozbor (body + doporučení).</div>}
+          {!result && (
+            <div className={`${chip} text-sm`}>
+              Piš do editoru – chybné pasáže uvidíš žlutě. Klikni Evaluate pro detailní rozbor (body + doporučení).
+            </div>
+          )}
 
           {result && (
             <>
@@ -293,10 +378,11 @@ export default function WritingTestPage() {
               </div>
 
               <div className="text-sm">
-                Celkem: <span className="font-semibold">{result.total50} / 50</span> ≈ <b>{(result.total50/5).toFixed(1)} / 10</b>
+                Celkem: <span className="font-semibold">{result.total50} / 50</span> ≈{" "}
+                <b>{(result.total50 / 5).toFixed(1)} / 10</b>
                 <span className={`ml-2 ${chip}`}>
-                  (Words: {result.facts.words}, Paragraphs: {result.facts.paragraphs}, Linking: {result.facts.linkingWords},
-                  Spelling: {result.facts.spellingErrors}, Grammar: {result.facts.grammarErrors}, Style: {result.facts.styleFlags})
+                  (Words: {result.facts.words}, Paragraphs: {result.facts.paragraphs}, Linking: {result.facts.linkingWords}, Spelling:{" "}
+                  {result.facts.spellingErrors}, Grammar: {result.facts.grammarErrors}, Style: {result.facts.styleFlags})
                 </span>
               </div>
 
@@ -308,7 +394,12 @@ export default function WritingTestPage() {
                     {result.spelling!.map((s, i) => (
                       <li key={i}>
                         <code className="px-1 rounded bg-black/20">{s.word}</code>
-                        {s.suggestion ? <> → <b>{s.suggestion}</b></> : null}
+                        {s.suggestion ? (
+                          <>
+                            {" "}
+                            → <b>{s.suggestion}</b>
+                          </>
+                        ) : null}
                         {s.count > 1 ? ` (${s.count}×)` : ""}
                       </li>
                     ))}
@@ -325,7 +416,12 @@ export default function WritingTestPage() {
                     {result.grammar!.map((g, i) => (
                       <li key={i}>
                         <b>{g.type.toUpperCase()}</b>: {g.message}
-                        {g.example ? <> — <code className="px-1 rounded bg-black/20">{g.example}</code></> : null}
+                        {g.example ? (
+                          <>
+                            {" "}
+                            — <code className="px-1 rounded bg-black/20">{g.example}</code>
+                          </>
+                        ) : null}
                         {g.count > 1 ? ` (${g.count}×)` : ""}
                       </li>
                     ))}
@@ -336,7 +432,7 @@ export default function WritingTestPage() {
               <div>
                 <h3 className="font-semibold mb-1">Pokrytí bodů zadání:</h3>
                 <ul className={`list-disc pl-5 text-sm ${isDark ? "text-neutral-200" : "text-neutral-700"}`}>
-                  {result.coverage.map(c => (
+                  {result.coverage.map((c) => (
                     <li key={c.id}>{c.covered ? "✅" : "⚠️"} {c.text}</li>
                   ))}
                 </ul>
@@ -345,7 +441,9 @@ export default function WritingTestPage() {
               <div>
                 <h3 className="font-semibold mb-1">Doporučení:</h3>
                 <ul className={`list-disc pl-5 text-sm ${isDark ? "text-neutral-200" : "text-neutral-700"}`}>
-                  {result.advice.map((a, i) => (<li key={i}>{a}</li>))}
+                  {result.advice.map((a, i) => (
+                    <li key={i}>{a}</li>
+                  ))}
                 </ul>
               </div>
             </>
