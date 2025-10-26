@@ -6,7 +6,8 @@ export async function POST(req: Request) {
     const { text, language } = await req.json();
 
     const endpoint =
-      process.env.LT_ENDPOINT || "https://api.languagetool.org/v2/check";
+  process.env.LT_ENDPOINT || "https://api.languagetoolplus.com/v2/check";
+
 
     const res = await fetch(endpoint, {
       method: "POST",
