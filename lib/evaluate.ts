@@ -1,212 +1,131 @@
-// /lib/evaluate.ts
-import type { WritingTask } from "./tasks";
-import { checkSpelling } from "./spell";
-import { checkGrammar, type GrammarIssue } from "./grammar";
+// /lib/proof.ts
+// Univerzální kontrola textu přes LanguageTool (pravopis, gramatika, styl).
+// Default endpoint: veřejné API. Pro produkci doporučuji vlastní LT server.
+// Dokumentace: https://languagetool.org/http-api/swagger-ui/
 
-export type EvalResult = {
-  scores: { language: number; form: number; organisation: number; effect: number; grammar: number };
-  total50: number;
-  coverage: { id: string; text: string; covered: boolean }[];
-  advice: string[];
-  facts: {
-    words: number; paragraphs: number; linkingWords: number; contractions: number; ttr: number;
-    spellingErrors: number; grammarErrors: number;
+export type LTReplacement = { value: string };
+export type LTMatch = {
+  message: string;
+  shortMessage?: string;
+  offset: number;
+  length: number;
+  context?: { text: string; offset: number; length: number };
+  replacements: LTReplacement[];
+  rule: {
+    id: string;
+    description: string;
+    issueType?: string; // "misspelling" / "typographical" / "grammar" / "style" ...
+    category: { id: string; name: string };
+    tags?: string[];
   };
-  spelling?: { word: string; suggestion: string; count: number }[];
-  spellingTokens?: { word: string; suggestion: string; start: number; end: number }[];
-  grammar?: GrammarIssue[];
 };
 
-const LINKING_WORDS = [
-  "firstly","secondly","however","moreover","therefore","in addition",
-  "for example","for instance","on the other hand","as a result",
-  "furthermore","nevertheless","in conclusion","to sum up"
-];
+export type ProofIssue = {
+  type: "spelling" | "grammar" | "style" | "other";
+  message: string;
+  example?: string;
+  start: number;
+  end: number;
+  text: string;
+  suggestion?: string;
+};
 
-const FORMAL_CUES = [
-  "dear sir or madam","to whom it may concern","i am writing to",
-  "yours faithfully","yours sincerely","best regards","regards",
-  "introduction","findings","recommendations","conclusion","background","analysis"
-];
+export type ProofResult = {
+  issues: ProofIssue[];
+  tokensForHighlight: { start: number; end: number }[]; // pro žluté zvýraznění
+  counts: { spelling: number; grammar: number; style: number; other: number; total: number };
+};
 
-const CONTRACTIONS = [
-  "I'm","I've","I'd","I'll","isn't","aren't","don't","doesn't","didn't",
-  "won't","can't","couldn't","shouldn't","it's","that's","there's","we're","they're"
-];
+const DEFAULT_ENDPOINT = "https://api.languagetool.org/v2/check";
+// Pokud budeš mít vlastní instanci, změň zde, nebo předej endpoint parametrem.
 
-const STOP = new Set([
-  "the","a","an","and","or","to","for","of","in","on","at","with","about","from",
-  "is","are","be","as","by","that","this","these","those"
-]);
+export async function proof(
+  text: string,
+  opts?: { language?: "en-US" | "en-GB"; endpoint?: string }
+): Promise<ProofResult> {
+  const endpoint = (opts?.endpoint || DEFAULT_ENDPOINT).trim();
+  const language = opts?.language || "en-GB"; // STANAG většinou preferuje britskou EN, případně "en-US"
 
-const clamp = (n: number, min: number, max: number) => Math.max(min, Math.min(max, n));
+  if (!text || text.trim().length === 0) {
+    return { issues: [], tokensForHighlight: [], counts: { spelling: 0, grammar: 0, style: 0, other: 0, total: 0 } };
+  }
 
-function wordCount(txt: string) {
-  const m = txt.trim().match(/[A-Za-zÀ-ž]+(?:'[A-Za-zÀ-ž]+)?/g);
-  return m ? m.length : 0;
-}
-function paragraphCount(txt: string) {
-  const blocks = txt
-    .split(/\r?\n/)
-    .map(s => s.trim())
-    .reduce<string[]>((acc, l) => {
-      if (l === "") acc.push("");
-      else acc[acc.length - 1] = (acc[acc.length - 1] || "") + "\n" + l;
-      return acc;
-    }, [""])
-    .filter(b => b.trim().length > 0);
-  if (blocks.length === 0 && txt.trim().length > 0) return 1;
-  return blocks.length;
-}
-function countLinkingWords(txt: string) {
-  const t = " " + txt.toLowerCase() + " ";
-  let count = 0;
-  LINKING_WORDS.forEach(w => {
-    if (w.includes(" ")) { if (t.includes(" " + w + " ")) count++; }
-    else { const re = new RegExp(`\\b${w}\\b`, "g"); if (t.match(re)) count++; }
-  });
-  return count;
-}
-function countContractions(txt: string) {
-  const re = new RegExp(CONTRACTIONS.map(c => c.replace(/[-/\\^$*+?.()|[\]{}]/g,'\\$&')).join("|"), "gi");
-  return txt.match(re)?.length ?? 0;
-}
-function typeTokenRatio(txt: string) {
-  const tokens = (txt.toLowerCase().match(/[a-zà-ž]+(?:'[a-zà-ž]+)?/gi) || []).filter(Boolean);
-  if (tokens.length === 0) return 0;
-  const types = new Set(tokens);
-  return types.size / tokens.length;
-}
-function pointCovered(textLower: string, point: string) {
-  const words = point.toLowerCase().split(/[^\p{L}]+/u).filter(w => w && !STOP.has(w));
-  if (words.length === 0) return false;
-  const uniq = Array.from(new Set(words));
-  const hits = uniq.filter(w => textLower.includes(w));
-  if (uniq.length >= 3) return hits.length >= 2;
-  if (uniq.length === 2) return hits.length >= 1;
-  return hits.length >= 1;
-}
+  // LT má limit ~20k znaků na dotaz – pro běžné STANAG texty OK.
+  const body = new URLSearchParams();
+  body.set("language", language);
+  body.set("text", text);
+  // Lepší návrhy:
+  body.set("enabledOnly", "false");
+  // Zvaž: "level": "picky" pro přísnější kontrolu, ale víc "šumu".
+  // body.set("level", "picky");
 
-export function evaluateSubmission(txt: string, task: WritingTask): EvalResult {
-  const words = wordCount(txt);
-  const paras = paragraphCount(txt);
-  const links = countLinkingWords(txt);
-  const contractions = countContractions(txt);
-  const ttr = typeTokenRatio(txt);
-  const lower = txt.toLowerCase();
-
-  // pravopis + gramatika
-  const spell = checkSpelling(txt);
-  const grammar = checkGrammar(txt);
-  const spellingErrors = spell.total;
-  const grammarErrors = (grammar.total ?? 0) + spellingErrors;
-
-  // coverage
-  const coverage = task.points.map(p => ({ id: p.id, text: p.text, covered: pointCovered(lower, p.text) }));
-  const coveredCount = coverage.filter(c => c.covered).length;
-
-  // limity délky
-  const fiftyPct = Math.round(task.minWords * 0.5);
-  const seventyPct = Math.round(task.minWords * 0.7);
-  if (words < 5) {
-    const zero = { language: 0, form: 0, organisation: 0, effect: 0, grammar: 0 };
+  let matches: LTMatch[] = [];
+  try {
+    const resp = await fetch(endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: body.toString(),
+    });
+    if (!resp.ok) throw new Error(`LanguageTool error HTTP ${resp.status}`);
+    const data = await resp.json();
+    matches = (data?.matches || []) as LTMatch[];
+  } catch (e) {
+    // Fallback: když není dostupné API, vrátíme prázdné výsledky
+    // (aplikace dál funguje, jen bez LT chyb).
     return {
-      scores: zero,
-      total50: 0,
-      coverage,
-      advice: ["Napiš text – aktuálně není co hodnotit.", `Cíl: alespoň ${task.minWords} slov.`],
-      facts: { words, paragraphs: paras, linkingWords: links, contractions, ttr: Number(ttr.toFixed(2)), spellingErrors, grammarErrors },
-      spelling: spell.issues,
-      spellingTokens: spell.tokens,
-      grammar: grammar.issues
+      issues: [],
+      tokensForHighlight: [],
+      counts: { spelling: 0, grammar: 0, style: 0, other: 0, total: 0 },
     };
   }
-  let hardCap = 10;
-  if (words < fiftyPct) hardCap = 2;
-  else if (words < seventyPct) hardCap = 4;
 
-  const formality = FORMAL_CUES.reduce((s, c) => s + (lower.includes(c) ? 1 : 0), 0);
+  const classify = (m: LTMatch): ProofIssue["type"] => {
+    const cat = m.rule?.category?.id?.toLowerCase() || "";
+    const issue = m.rule?.issueType?.toLowerCase() || "";
+    const desc = (m.rule?.description || "").toLowerCase();
 
-  // LANGUAGE
-  let language = 0;
-  if (ttr >= 0.30) language += 2;
-  if (ttr >= 0.50) language += 2;
-  if (ttr >= 0.65) language += 1;
-  if (links >= 2) language += 1;
-  if (links >= 4) language += 1;
-  if (contractions === 0) language += 1;
-  language = clamp(language, 0, 10);
-
-  // FORM
-  let form = 0;
-  if (formality >= 1) form += 2;
-  if (formality >= 3) form += 1;
-  if (words >= task.minWords) form += 4;
-  if (words >= Math.round(task.minWords * 1.2)) form += 1;
-  if (contractions === 0) form += 1; else if (contractions >= 3) form -= 1;
-  form = clamp(form, 0, 10);
-
-  // ORGANISATION
-  let organisation = 0;
-  if (paras >= 2) organisation += 2;
-  if (paras >= 3) organisation += 2;
-  if (links >= 3) organisation += 1;
-  if (coveredCount === task.points.length) organisation += 3;
-  organisation = clamp(organisation, 0, 10);
-
-  // EFFECT
-  let effect = 0;
-  if (formality >= 2) effect += 2;
-  if (paras >= 3) effect += 1;
-  if (words >= task.minWords) effect += 3;
-  if (coveredCount < task.points.length) effect -= 1;
-  effect = clamp(effect, 0, 10);
-
-  // GRAMMAR & MECHANICS
-  const errorsPer100 = (grammarErrors / Math.max(1, words)) * 100;
-  let grammarScore = 10 - Math.ceil(errorsPer100 / 3);
-  const severe = (grammar.issues || [])
-    .filter(i => i.type === "sentenceStartLower" || i.type === "missingEndPunctuation")
-    .reduce((s, i) => s + (i.count ?? 0), 0);
-  grammarScore -= Math.min(3, severe);
-  grammarScore = clamp(grammarScore, 0, 10);
-
-  // caps
-  if (coveredCount < task.points.length) {
-    organisation = Math.min(organisation, 7);
-    effect = Math.min(effect, 7);
-  }
-  language = Math.min(language, hardCap);
-  form = Math.min(form, hardCap);
-  organisation = Math.min(organisation, hardCap);
-  effect = Math.min(effect, hardCap);
-  grammarScore = Math.min(grammarScore, hardCap);
-
-  const scores = { language, form, organisation, effect, grammar: grammarScore };
-  const total50 = language + form + organisation + effect + grammarScore;
-
-  const advice: string[] = [];
-  if (words < task.minWords) {
-    if (words < fiftyPct) advice.push(`Text je příliš krátký (< ${fiftyPct} slov). Cíl: ≥ ${task.minWords} slov.`);
-    else if (words < seventyPct) advice.push(`Přidej obsah (aktuálně < 70 % minima). Cíl: ≥ ${task.minWords} slov.`);
-    else advice.push(`Doplň pár vět, ať splníš minimum ${task.minWords} slov.`);
-  }
-  if (coveredCount < task.points.length) advice.push("Doplň všechny body zadání – chybějící body snižují hodnocení.");
-  if (links < 3) advice.push("Přidej více linking words (Firstly, However, Therefore, For example…).");
-  if (contractions > 0) advice.push("Vyhni se kontrakcím (don't, won't…) – drž formální styl.");
-  if (paras < 3) advice.push("Rozděl text do minimálně tří odstavců s topic sentences.");
-  if (grammarErrors > 0) advice.push("Oprav gramatické a pravopisné chyby (viz seznam níže).");
-  if (task.type === "letter" || task.type === "email") advice.push("Použij formální úvod a závěr (Dear Sir or Madam…, Yours faithfully…).");
-  if (task.type === "report") advice.push("Použij nadpisy/sekce (Introduction, Findings/Analysis, Conclusion/Recommendations).");
-
-  return {
-    scores,
-    total50,
-    coverage,
-    advice,
-    facts: { words, paragraphs: paras, linkingWords: links, contractions, ttr: Number(ttr.toFixed(2)), spellingErrors, grammarErrors },
-    spelling: spell.issues,
-    spellingTokens: spell.tokens,
-    grammar: grammar.issues
+    // heuristiky — LT někdy posílá různé kombinace
+    if (issue.includes("misspell") || cat.includes("typos") || desc.includes("spelling")) return "spelling";
+    if (issue.includes("grammar") || cat.includes("grammar")) return "grammar";
+    if (issue.includes("style") || cat.includes("style") || cat.includes("punctuation")) return "style";
+    return "other";
   };
+
+  const issues: ProofIssue[] = matches.map((m) => {
+    const type = classify(m);
+    const start = Math.max(0, m.offset);
+    const end = Math.max(start, m.offset + m.length);
+    const suggestion = m.replacements?.[0]?.value;
+    const contextText = m.context?.text || "";
+    let example = "";
+    if (contextText && m.context?.offset !== undefined && m.context?.length !== undefined) {
+      const cStart = m.context.offset;
+      const cEnd = cStart + m.context.length;
+      example = contextText.slice(Math.max(0, cStart - 20), Math.min(contextText.length, cEnd + 20));
+    }
+    return {
+      type,
+      message: m.message || m.shortMessage || m.rule?.description || "Issue",
+      example: example || undefined,
+      start,
+      end,
+      text: "", // doplníme později, pokud bude potřeba
+      suggestion,
+    };
+  });
+
+  // tokeny pro zvýraznění: zvýrazníme jen spelling + vybrané grammar/style (např. chybějící článek)
+  const tokensForHighlight = issues
+    .filter((i) => i.type === "spelling" || i.type === "grammar")
+    .map((i) => ({ start: i.start, end: i.end }));
+
+  const counts = {
+    spelling: issues.filter((i) => i.type === "spelling").length,
+    grammar: issues.filter((i) => i.type === "grammar").length,
+    style: issues.filter((i) => i.type === "style").length,
+    other: issues.filter((i) => i.type === "other").length,
+    total: issues.length,
+  };
+
+  return { issues, tokensForHighlight, counts };
 }
