@@ -7,7 +7,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { task1Pool, task2Options, type WritingTask } from "@/lib/tasks";
 import { evaluateSubmission, type EvalResult } from "@/lib/evaluate";
-import { checkSpelling } from "@/lib/spell";
+import { proof } from "@/lib/proof";
 
 type Mode = "idle" | "task1" | "task2";
 
@@ -54,11 +54,11 @@ export default function WritingTestPage() {
   const [timer, setTimer] = useState(80 * 60);
   const [result, setResult] = useState<EvalResult | null>(null);
 
-  // živá kontrola pravopisu pro zvýraznění
-  const liveSpell = useMemo(() => checkSpelling(textValue), [textValue]);
+  // live highlight tokeny z LanguageTool
+  const [liveTokens, setLiveTokens] = useState<{ start: number; end: number }[]>([]);
   const highlightedHTML = useMemo(
-    () => buildHighlightedHTML(textValue, liveSpell.tokens.map(t => ({ start: t.start, end: t.end }))),
-    [textValue, liveSpell.tokens]
+    () => buildHighlightedHTML(textValue, liveTokens),
+    [textValue, liveTokens]
   );
 
   // persist
@@ -96,29 +96,42 @@ export default function WritingTestPage() {
 
   function startTask1() {
     const pick = task1Pool[Math.floor(Math.random() * task1Pool.length)];
-    setMode("task1"); setTask(pick); setTextValue(""); setResult(null); setTimer(80 * 60);
+    setMode("task1"); setTask(pick); setTextValue(""); setResult(null); setTimer(80 * 60); setLiveTokens([]);
   }
   function startTask2() {
     const pick = task2Options[Math.floor(Math.random() * task2Options.length)];
-    setMode("task2"); setTask(pick); setTextValue(""); setResult(null); setTimer(80 * 60);
+    setMode("task2"); setTask(pick); setTextValue(""); setResult(null); setTimer(80 * 60); setLiveTokens([]);
   }
 
-  function handleEvaluate() {
+  async function handleEvaluate() {
     if (!task) return;
-    const r = evaluateSubmission(textValue, task);
+    const r = await evaluateSubmission(textValue, task, { language: "en-GB" });
     setResult(r);
+    // při finálním hodnocení převezmeme žluté tokeny z výsledku (přesnější než debounce)
+    setLiveTokens(r.spellingTokens || []);
   }
-  function handleClear() { setTextValue(""); setResult(null); }
+  function handleClear() { setTextValue(""); setResult(null); setLiveTokens([]); }
 
-  // Auto-evaluate (debounce)
+  // ==== Live LanguageTool highlight s debounce ====
   const debounceRef = useRef<number | null>(null);
+  const inflightRef = useRef<number>(0);
+
   useEffect(() => {
-    if (!task) return;
-    if (words === 0) { setResult(null); return; }
+    if (!task) { setLiveTokens([]); return; }
+    // prázdný text = žádná kontrola
+    if (!textValue || textValue.trim().length === 0) { setLiveTokens([]); return; }
+
     if (debounceRef.current) window.clearTimeout(debounceRef.current);
-    debounceRef.current = window.setTimeout(() => setResult(evaluateSubmission(textValue, task)), 600);
+    debounceRef.current = window.setTimeout(async () => {
+      const id = ++inflightRef.current;
+      const res = await proof(textValue, { language: "en-GB" });
+      if (id !== inflightRef.current) return; // příchozí starší výsledek zahoď
+      setLiveTokens(res.tokensForHighlight);
+      // lehké auto-hodnocení bez psaní do result (necháme až na Evaluate)
+    }, 600);
+
     return () => { if (debounceRef.current) window.clearTimeout(debounceRef.current); };
-  }, [textValue, words, task]);
+  }, [textValue, task]);
 
   const ScoreCard = ({ label, val }: { label: string; val: number }) => {
     const percent = Math.max(0, Math.min(100, val * 10));
@@ -220,7 +233,6 @@ export default function WritingTestPage() {
 
           {/* Overlay editor: pod průhledným textarea je <pre> se zvýrazněním */}
           <div className={`relative rounded-xl border ${editorBorder}`}>
-            {/* podklad s textem a highlightem */}
             <pre
               ref={preRef}
               className={`pointer-events-none absolute inset-0 overflow-auto ${editorBg} ${editorText} rounded-xl p-4 whitespace-pre-wrap leading-relaxed`}
@@ -228,15 +240,18 @@ export default function WritingTestPage() {
               // eslint-disable-next-line react/no-danger
               dangerouslySetInnerHTML={{ __html: highlightedHTML || "&nbsp;" }}
             />
-            {/* textarea je průhledná, kopíruje padding/line-height, aby text seděl; scroll sync */}
             <textarea
               ref={taRef}
               className={`relative z-10 w-full h-64 bg-transparent ${editorText} rounded-xl p-4 focus:outline-none focus:ring-2 ${focusRing}`}
               placeholder="Write your answer here… (formal style, paragraphs, linking words)"
               value={textValue}
               onChange={(e) => setTextValue(e.target.value)}
-              onScroll={onScrollSync}
-              spellCheck={true}
+              onScroll={() => {
+                if (!preRef.current || !taRef.current) return;
+                preRef.current.scrollTop = taRef.current.scrollTop;
+                preRef.current.scrollLeft = taRef.current.scrollLeft;
+              }}
+              spellCheck={false} // necháme kontrolu čistě na LT, aby se "netloukla" s prohlížečem
               lang="en"
               style={{ lineHeight: "1.625" }}
             />
@@ -265,7 +280,7 @@ export default function WritingTestPage() {
         <CardContent className="p-6 grid gap-4">
           <h2 className="text-lg font-semibold">Výsledek</h2>
 
-          {!result && <div className={`${chip} text-sm`}>Vyber Task, napiš text – špatná slovíčka uvidíš žlutě zvýrazněná. Klikni Evaluate pro detailní rozbor.</div>}
+          {!result && <div className={`${chip} text-sm`}>Piš do editoru – chybné pasáže uvidíš žlutě. Klikni Evaluate pro detailní rozbor (body + doporučení).</div>}
 
           {result && (
             <>
@@ -281,34 +296,36 @@ export default function WritingTestPage() {
                 Celkem: <span className="font-semibold">{result.total50} / 50</span> ≈ <b>{(result.total50/5).toFixed(1)} / 10</b>
                 <span className={`ml-2 ${chip}`}>
                   (Words: {result.facts.words}, Paragraphs: {result.facts.paragraphs}, Linking: {result.facts.linkingWords},
-                  Spelling: {result.facts.spellingErrors}, Grammar: {result.facts.grammarErrors})
+                  Spelling: {result.facts.spellingErrors}, Grammar: {result.facts.grammarErrors}, Style: {result.facts.styleFlags})
                 </span>
               </div>
 
-              {/* Špatně napsaná slovíčka s návrhy */}
+              {/* Špatně napsaná slovíčka + návrhy */}
               {(result.spelling?.length || 0) > 0 && (
                 <div>
-                  <h3 className="font-semibold mb-1">Špatně napsaná slovíčka (opravy):</h3>
+                  <h3 className="font-semibold mb-1">Špatně napsaná slovíčka (návrhy oprav):</h3>
                   <ul className={`list-disc pl-5 text-sm ${isDark ? "text-neutral-200" : "text-neutral-700"}`}>
                     {result.spelling!.map((s, i) => (
                       <li key={i}>
-                        <code className="px-1 rounded bg-black/20">{s.word}</code> → <b>{s.suggestion}</b>
+                        <code className="px-1 rounded bg-black/20">{s.word}</code>
+                        {s.suggestion ? <> → <b>{s.suggestion}</b></> : null}
                         {s.count > 1 ? ` (${s.count}×)` : ""}
                       </li>
                     ))}
                   </ul>
+                  <div className={`${chip} text-xs mt-1`}>Konkrétní chybné segmenty jsou žlutě v editoru výše.</div>
                 </div>
               )}
 
-              {/* Gramatika */}
+              {/* Gramatika & styl */}
               {(result.grammar?.length || 0) > 0 && (
                 <div>
-                  <h3 className="font-semibold mb-1">Gramatika & mechanika – nalezené problémy:</h3>
+                  <h3 className="font-semibold mb-1">Gramatika / styl – nalezené problémy:</h3>
                   <ul className={`list-disc pl-5 text-sm ${isDark ? "text-neutral-200" : "text-neutral-700"}`}>
                     {result.grammar!.map((g, i) => (
                       <li key={i}>
-                        {g.message}
-                        {g.example ? <> – <code className="px-1 rounded bg-black/20">{g.example}</code></> : null}
+                        <b>{g.type.toUpperCase()}</b>: {g.message}
+                        {g.example ? <> — <code className="px-1 rounded bg-black/20">{g.example}</code></> : null}
                         {g.count > 1 ? ` (${g.count}×)` : ""}
                       </li>
                     ))}
