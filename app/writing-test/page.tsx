@@ -1,3 +1,4 @@
+// /app/writing-test/page.tsx
 "use client";
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
@@ -6,26 +7,22 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { task1Pool, task2Options, type WritingTask } from "@/lib/tasks";
 import { evaluateSubmission, type EvalResult } from "@/lib/evaluate";
-import { checkSpelling, checkUnknownWords } from "@/lib/spell";
+import { checkSpelling } from "@/lib/spell";
 
 type Mode = "idle" | "task1" | "task2";
 
 // HTML escape pro bezpečné zvýraznění
-const escapeHtml = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-function buildHighlightedHTML(
-  text: string,
-  miss: {start:number; end:number}[],
-  unknown: {start:number; end:number}[]
-) {
-  // sloučíme oba seznamy tokenů a vykreslíme: miss (žlutě), unknown (žlutě) – stejný vzhled
-  const all = [...miss.map(t=>({ ...t, kind:"miss" as const })), ...unknown.map(t=>({ ...t, kind:"unk" as const }))].sort((a,b)=>a.start-b.start);
-  if (!all.length) return escapeHtml(text);
-  let i=0, out="";
-  for (const t of all) {
-    if (t.start < i) continue;
+function escapeHtml(s: string) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+function buildHighlightedHTML(text: string, tokens: { start: number; end: number }[]) {
+  if (!tokens.length) return escapeHtml(text);
+  const sorted = [...tokens].sort((a, b) => a.start - b.start);
+  let i = 0, out = "";
+  for (const t of sorted) {
+    if (t.start < i) continue; // překryvy ignoruj
     out += escapeHtml(text.slice(i, t.start));
-    const cls = "rounded px-0.5 bg-yellow-300/60 text-inherit";
-    out += `<mark class="${cls}">${escapeHtml(text.slice(t.start, t.end))}</mark>`;
+    out += `<mark class="rounded px-0.5 bg-yellow-300/60 text-inherit">${escapeHtml(text.slice(t.start, t.end))}</mark>`;
     i = t.end;
   }
   out += escapeHtml(text.slice(i));
@@ -57,26 +54,11 @@ export default function WritingTestPage() {
   const [timer, setTimer] = useState(80 * 60);
   const [result, setResult] = useState<EvalResult | null>(null);
 
-  // slovník (načte se z /public/dict/en-basic.txt)
-  const [dict, setDict] = useState<Set<string> | null>(null);
-  useEffect(() => {
-    fetch("/dict/en-basic.txt")
-      .then(r => r.text())
-      .then(t => {
-        const set = new Set(
-          t.split(/\r?\n/).map(w => w.trim().toLowerCase()).filter(Boolean)
-        );
-        setDict(set);
-      })
-      .catch(() => setDict(null));
-  }, []);
-
-  // živá kontrola pro overlay (běží rychle, bez vyhodnocení skóre)
-  const liveMiss = useMemo(() => checkSpelling(textValue).tokens, [textValue]);
-  const liveUnk = useMemo(() => checkUnknownWords(textValue, dict || undefined).tokens, [textValue, dict]);
+  // živá kontrola pravopisu pro zvýraznění
+  const liveSpell = useMemo(() => checkSpelling(textValue), [textValue]);
   const highlightedHTML = useMemo(
-    () => buildHighlightedHTML(textValue, liveMiss, liveUnk),
-    [textValue, liveMiss, liveUnk]
+    () => buildHighlightedHTML(textValue, liveSpell.tokens.map(t => ({ start: t.start, end: t.end }))),
+    [textValue, liveSpell.tokens]
   );
 
   // persist
@@ -93,7 +75,7 @@ export default function WritingTestPage() {
   }, []);
   useEffect(() => {
     localStorage.setItem("stanag_last_attempt", JSON.stringify({ mode, task, text: textValue, timer, result }));
-  }, [mode, task, text, textValue, timer, result]);
+  }, [mode, task, textValue, timer, result]);
 
   useEffect(() => {
     const m = textValue.trim().match(/[A-Za-zÀ-ž]+(?:'[A-Za-zÀ-ž]+)?/g);
@@ -123,7 +105,7 @@ export default function WritingTestPage() {
 
   function handleEvaluate() {
     if (!task) return;
-    const r = evaluateSubmission(textValue, task, dict || undefined);
+    const r = evaluateSubmission(textValue, task);
     setResult(r);
   }
   function handleClear() { setTextValue(""); setResult(null); }
@@ -134,11 +116,9 @@ export default function WritingTestPage() {
     if (!task) return;
     if (words === 0) { setResult(null); return; }
     if (debounceRef.current) window.clearTimeout(debounceRef.current);
-    debounceRef.current = window.setTimeout(() => {
-      setResult(evaluateSubmission(textValue, task, dict || undefined));
-    }, 600);
+    debounceRef.current = window.setTimeout(() => setResult(evaluateSubmission(textValue, task)), 600);
     return () => { if (debounceRef.current) window.clearTimeout(debounceRef.current); };
-  }, [textValue, words, task, dict]);
+  }, [textValue, words, task]);
 
   const ScoreCard = ({ label, val }: { label: string; val: number }) => {
     const percent = Math.max(0, Math.min(100, val * 10));
@@ -156,7 +136,16 @@ export default function WritingTestPage() {
     );
   };
 
-  // styly overlay editoru
+  // overlay refs pro synchronizaci scrollu
+  const preRef = useRef<HTMLPreElement | null>(null);
+  const taRef = useRef<HTMLTextAreaElement | null>(null);
+  const onScrollSync = () => {
+    if (!preRef.current || !taRef.current) return;
+    preRef.current.scrollTop = taRef.current.scrollTop;
+    preRef.current.scrollLeft = taRef.current.scrollLeft;
+  };
+
+  // styly pro overlay editor
   const editorBorder = isDark ? "border-neutral-700" : "border-neutral-300";
   const editorBg = isDark ? "bg-black" : "bg-white";
   const editorText = isDark ? "text-white" : "text-black";
@@ -181,13 +170,17 @@ export default function WritingTestPage() {
               <div className="font-semibold">
                 Formal Letter / E-mail <span className={`${chip}`}>(min. 120 words)</span>
               </div>
-              <p className={`text-sm mt-2 ${subText}`}><b>Instruction:</b> Write a formal letter/e-mail or memo on a job-related topic. Cover all three points.</p>
+              <p className={`text-sm mt-2 ${subText}`}>
+                <b>Instruction:</b> Write a formal letter/e-mail or memo on a job-related topic. Cover all three points.
+              </p>
               <ul className={`list-disc pl-5 text-sm mt-2 ${isDark ? "text-neutral-200" : "text-neutral-700"}`}>
                 <li>Formal style (no contractions, impersonal tone)</li>
                 <li>Paragraphing with topic sentences</li>
                 <li>Cover all 3 points from the prompt</li>
               </ul>
-              <div className="mt-3"><Button className={`${btnPrimary}`} onClick={startTask1}>Start Task 1 (random)</Button></div>
+              <div className="mt-3">
+                <Button className={`${btnPrimary}`} onClick={startTask1}>Start Task 1 (random)</Button>
+              </div>
             </div>
 
             <div className={`rounded-xl p-4 ${cardInner} border ${cardBorder}`}>
@@ -195,15 +188,19 @@ export default function WritingTestPage() {
               <div className="font-semibold">
                 Report <span className={`${chip}`}>(min. 200 words)</span>
               </div>
-              <p className={`text-sm mt-2 ${subText}`}>Choose <b>one</b> of two topics and write a report with clear headings/paragraphs.</p>
-              <div className="mt-3"><Button className={`${btnPrimary}`} onClick={startTask2}>Start Task 2 (random)</Button></div>
+              <p className={`text-sm mt-2 ${subText}`}>
+                Choose <b>one</b> of two topics and write a report with clear headings/paragraphs.
+              </p>
+              <div className="mt-3">
+                <Button className={`${btnPrimary}`} onClick={startTask2}>Start Task 2 (random)</Button>
+              </div>
             </div>
           </div>
           <div className={`text-xs ${chip}`}>Time limit for the whole writing paper: 80 minutes.</div>
         </CardContent>
       </Card>
 
-      {/* ===== Editor s overlay zvýrazněním ===== */}
+      {/* ===== Editor s vizuálním zvýrazněním chyb ===== */}
       <Card className={`${cardBg} ${cardBorder} ${text}`}>
         <CardContent className="p-6 grid gap-4">
           <div className={`flex flex-wrap justify-between items-center text-sm ${subText} gap-2`}>
@@ -212,7 +209,7 @@ export default function WritingTestPage() {
           </div>
 
           {task && (
-            <div className={`rounded-lg p-3 ${cardInner} border ${cardBorder}`}>
+            <div className={`rounded-xl p-3 ${cardInner} border ${cardBorder}`}>
               <div className="text-sm font-semibold mb-1">{task.label}</div>
               <div className="text-sm">{task.instruction}</div>
               <ul className={`list-disc pl-5 text-sm mt-2 ${isDark ? "text-neutral-200" : "text-neutral-700"}`}>
@@ -221,18 +218,24 @@ export default function WritingTestPage() {
             </div>
           )}
 
+          {/* Overlay editor: pod průhledným textarea je <pre> se zvýrazněním */}
           <div className={`relative rounded-xl border ${editorBorder}`}>
+            {/* podklad s textem a highlightem */}
             <pre
+              ref={preRef}
               className={`pointer-events-none absolute inset-0 overflow-auto ${editorBg} ${editorText} rounded-xl p-4 whitespace-pre-wrap leading-relaxed`}
               aria-hidden="true"
               // eslint-disable-next-line react/no-danger
               dangerouslySetInnerHTML={{ __html: highlightedHTML || "&nbsp;" }}
             />
+            {/* textarea je průhledná, kopíruje padding/line-height, aby text seděl; scroll sync */}
             <textarea
+              ref={taRef}
               className={`relative z-10 w-full h-64 bg-transparent ${editorText} rounded-xl p-4 focus:outline-none focus:ring-2 ${focusRing}`}
               placeholder="Write your answer here… (formal style, paragraphs, linking words)"
               value={textValue}
               onChange={(e) => setTextValue(e.target.value)}
+              onScroll={onScrollSync}
               spellCheck={true}
               lang="en"
               style={{ lineHeight: "1.625" }}
@@ -250,4 +253,88 @@ export default function WritingTestPage() {
           <div className={`flex flex-wrap items-center justify-between gap-3 text-xs ${subText}`}>
             <div><b>Checklist:</b> cover all 3 points · use ≥3 linking words · formal style · topic sentences · meet word limit</div>
             <div className="flex gap-3">
-              <Button className={`${
+              <Button className={`${btnOutline}`} onClick={handleClear}>Clear</Button>
+              <Button className={`${btnPrimary}`} onClick={handleEvaluate} disabled={!task || words === 0}>Evaluate</Button>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
+      {/* ===== Výsledek ===== */}
+      <Card className={`${cardBg} ${cardBorder} ${text}`}>
+        <CardContent className="p-6 grid gap-4">
+          <h2 className="text-lg font-semibold">Výsledek</h2>
+
+          {!result && <div className={`${chip} text-sm`}>Vyber Task, napiš text – špatná slovíčka uvidíš žlutě zvýrazněná. Klikni Evaluate pro detailní rozbor.</div>}
+
+          {result && (
+            <>
+              <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+                <ScoreCard label="Language resources & accuracy" val={result.scores.language} />
+                <ScoreCard label="Form (format & requirements)" val={result.scores.form} />
+                <ScoreCard label="Organisation & content" val={result.scores.organisation} />
+                <ScoreCard label="Effect on the reader" val={result.scores.effect} />
+                <ScoreCard label="Grammar & mechanics" val={result.scores.grammar} />
+              </div>
+
+              <div className="text-sm">
+                Celkem: <span className="font-semibold">{result.total50} / 50</span> ≈ <b>{(result.total50/5).toFixed(1)} / 10</b>
+                <span className={`ml-2 ${chip}`}>
+                  (Words: {result.facts.words}, Paragraphs: {result.facts.paragraphs}, Linking: {result.facts.linkingWords},
+                  Spelling: {result.facts.spellingErrors}, Grammar: {result.facts.grammarErrors})
+                </span>
+              </div>
+
+              {/* Špatně napsaná slovíčka s návrhy */}
+              {(result.spelling?.length || 0) > 0 && (
+                <div>
+                  <h3 className="font-semibold mb-1">Špatně napsaná slovíčka (opravy):</h3>
+                  <ul className={`list-disc pl-5 text-sm ${isDark ? "text-neutral-200" : "text-neutral-700"}`}>
+                    {result.spelling!.map((s, i) => (
+                      <li key={i}>
+                        <code className="px-1 rounded bg-black/20">{s.word}</code> → <b>{s.suggestion}</b>
+                        {s.count > 1 ? ` (${s.count}×)` : ""}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {/* Gramatika */}
+              {(result.grammar?.length || 0) > 0 && (
+                <div>
+                  <h3 className="font-semibold mb-1">Gramatika & mechanika – nalezené problémy:</h3>
+                  <ul className={`list-disc pl-5 text-sm ${isDark ? "text-neutral-200" : "text-neutral-700"}`}>
+                    {result.grammar!.map((g, i) => (
+                      <li key={i}>
+                        {g.message}
+                        {g.example ? <> – <code className="px-1 rounded bg-black/20">{g.example}</code></> : null}
+                        {g.count > 1 ? ` (${g.count}×)` : ""}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              <div>
+                <h3 className="font-semibold mb-1">Pokrytí bodů zadání:</h3>
+                <ul className={`list-disc pl-5 text-sm ${isDark ? "text-neutral-200" : "text-neutral-700"}`}>
+                  {result.coverage.map(c => (
+                    <li key={c.id}>{c.covered ? "✅" : "⚠️"} {c.text}</li>
+                  ))}
+                </ul>
+              </div>
+
+              <div>
+                <h3 className="font-semibold mb-1">Doporučení:</h3>
+                <ul className={`list-disc pl-5 text-sm ${isDark ? "text-neutral-200" : "text-neutral-700"}`}>
+                  {result.advice.map((a, i) => (<li key={i}>{a}</li>))}
+                </ul>
+              </div>
+            </>
+          )}
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
