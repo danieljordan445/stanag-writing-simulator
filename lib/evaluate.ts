@@ -21,6 +21,7 @@ export type EvalResult = {
   spelling?: { word: string; suggestion?: string; count: number }[];
   spellingTokens?: { start: number; end: number }[];
   grammar?: GrammarIssue[];
+  engine?: { ok: boolean; source: "lt" | "fallback" | "none"; error?: string }; // <— NOVÉ
 };
 
 const LINKING_WORDS = [
@@ -99,7 +100,6 @@ function aggregateIssues(issues: ProofIssue[]) {
   const style = issues.filter(i => i.type === "style");
   const other = issues.filter(i => i.type === "other");
 
-  // "Špatně napsaná slovíčka" – seskupení (nemáme přímo slovo, uživatel ho uvidí žlutě)
   const spellingList = spelling.map(i => ({
     word: "[spelling error]",
     suggestion: i.suggestion,
@@ -138,7 +138,7 @@ export async function evaluateSubmission(
   const ttr = typeTokenRatio(txt);
   const lower = txt.toLowerCase();
 
-  // Kontrola až při Evaluate:
+  // Kontrola (LT nebo fallback)
   const lt = await proof(txt, { language: opts?.language || "en-GB" });
   const agg = aggregateIssues(lt.issues);
 
@@ -158,13 +158,14 @@ export async function evaluateSubmission(
       facts: { words, paragraphs: paras, linkingWords: links, contractions, ttr: Number(ttr.toFixed(2)), spellingErrors: 0, grammarErrors: 0, styleFlags: 0 },
       spelling: [],
       spellingTokens: [],
-      grammar: []
+      grammar: [],
+      engine: { ok: lt.ok, source: lt.source, error: lt.error }
     };
   }
 
   const formality = FORMAL_CUES.reduce((s, c) => s + (lower.includes(c) ? 1 : 0), 0);
 
-  // Jazykové zdroje
+  // LANGUAGE
   let language = 0;
   if (ttr >= 0.30) language += 2;
   if (ttr >= 0.50) language += 2;
@@ -174,7 +175,7 @@ export async function evaluateSubmission(
   if (contractions === 0) language += 1;
   language = clamp(language, 0, 10);
 
-  // Formální požadavky
+  // FORM
   let form = 0;
   if (formality >= 1) form += 2;
   if (formality >= 3) form += 1;
@@ -183,7 +184,7 @@ export async function evaluateSubmission(
   if (contractions === 0) form += 1; else if (contractions >= 3) form -= 1;
   form = clamp(form, 0, 10);
 
-  // Organizace
+  // ORGANISATION
   let organisation = 0;
   if (paras >= 2) organisation += 2;
   if (paras >= 3) organisation += 2;
@@ -191,7 +192,7 @@ export async function evaluateSubmission(
   if (coveredCount === task.points.length) organisation += 3;
   organisation = clamp(organisation, 0, 10);
 
-  // Efekt
+  // EFFECT
   let effect = 0;
   if (formality >= 2) effect += 2;
   if (paras >= 3) effect += 1;
@@ -199,7 +200,7 @@ export async function evaluateSubmission(
   if (coveredCount < task.points.length) effect -= 1;
   effect = clamp(effect, 0, 10);
 
-  // Grammar & mechanics (LT)
+  // Grammar & mechanics
   const spellingErrors = agg.counts.spelling;
   const grammarCore = agg.counts.grammar;
   const styleFlags = agg.counts.style;
@@ -208,7 +209,7 @@ export async function evaluateSubmission(
   let grammarScore = 10 - Math.ceil(errorsPer100 / 3);
   grammarScore = clamp(grammarScore, 0, 10);
 
-  // limity za krátký text
+  // limity krátkého textu
   let hardCap = 10;
   if (words < fiftyPct) hardCap = 2;
   else if (words < seventyPct) hardCap = 4;
@@ -251,6 +252,7 @@ export async function evaluateSubmission(
     },
     spelling: agg.spellingList,
     spellingTokens: agg.highlight,
-    grammar: agg.grammarIssues
+    grammar: agg.grammarIssues,
+    engine: { ok: lt.ok, source: lt.source, error: lt.error }
   };
 }
