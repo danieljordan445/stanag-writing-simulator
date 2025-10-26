@@ -1,6 +1,6 @@
 // /lib/proof.ts
-// Klientská funkce "proof" volá interní Next.js API /api/proof.
-// Vrací sjednocený výsledek pro UI (issues + tokeny pro highlight).
+// Kontrola textu přes interní /api/proof (LanguageTool). Pokud selže, spustí offline fallback
+// s nejčastějšími překlepy, aby uživatel vždy dostal aspoň nějaké upozornění.
 
 export type LTReplacement = { value: string };
 export type LTMatch = {
@@ -29,11 +29,68 @@ export type ProofIssue = {
 };
 
 export type ProofResult = {
+  ok: boolean;                   // true = LT úspěch; false = chyba (použit fallback/none)
+  source: "lt" | "fallback" | "none";
+  error?: string;                // popis chyby, když ok=false
   issues: ProofIssue[];
   tokensForHighlight: { start: number; end: number }[];
   counts: { spelling: number; grammar: number; style: number; other: number; total: number };
 };
 
+// --- OFFLINE FALLBACK (nejčastější překlepy) ---
+const COMMON_MISSPELLINGS: Record<string, string> = {
+  recieve: "receive", recieved: "received", seperate: "separate", definately: "definitely",
+  occured: "occurred", ocurrence: "occurrence", occurence: "occurrence",
+  adress: "address", accomodation: "accommodation", accomodate: "accommodate",
+  acheive: "achieve", beleive: "believe", calender: "calendar",
+  commited: "committed", comittee: "committee", enviroment: "environment",
+  goverment: "government", gaurd: "guard", independant: "independent",
+  inteligent: "intelligent", interesing: "interesting", neccessary: "necessary",
+  ocasion: "occasion", ocassion: "occasion", posession: "possession",
+  preffered: "preferred", prefered: "preferred", recomend: "recommend",
+  recomendation: "recommendation", recomendations: "recommendations",
+  responsability: "responsibility", seperateley: "separately",
+  succesful: "successful", suceed: "succeed", privilage: "privilege",
+  writting: "writing", thier: "their", teh: "the", embarass: "embarrass",
+  embarassment: "embarrassment", millenium: "millennium", haras: "harass",
+  publically: "publicly", arguement: "argument", concensus: "consensus",
+  manouver: "manoeuvre", persue: "pursue", persuit: "pursuit",
+  liasion: "liaison", liason: "liaison", mantain: "maintain",
+  maintanance: "maintenance", expacted: "expected" // pro tvůj příklad :)
+};
+const WORD_RE = /[A-Za-z]+(?:'[A-Za-z]+)?/g;
+
+function fallbackCheck(text: string): ProofResult {
+  const issues: ProofIssue[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = WORD_RE.exec(text)) !== null) {
+    const word = m[0];
+    const lw = word.toLowerCase();
+    const sug = COMMON_MISSPELLINGS[lw];
+    if (sug) {
+      issues.push({
+        type: "spelling",
+        message: `Possible misspelling: "${word}"`,
+        start: m.index,
+        end: m.index + word.length,
+        suggestion: sug,
+      });
+    }
+  }
+  const tokensForHighlight = issues.map(i => ({ start: i.start, end: i.end }));
+  return {
+    ok: false,
+    source: issues.length ? "fallback" : "none",
+    issues,
+    tokensForHighlight,
+    counts: {
+      spelling: issues.filter(i => i.type === "spelling").length,
+      grammar: 0, style: 0, other: 0, total: issues.length
+    }
+  };
+}
+
+// --- LanguageTool klasifikace ---
 function classify(m: LTMatch): ProofIssue["type"] {
   const cat = m.rule?.category?.id?.toLowerCase() || "";
   const issue = m.rule?.issueType?.toLowerCase() || "";
@@ -50,6 +107,8 @@ export async function proof(
 ): Promise<ProofResult> {
   if (!text || text.trim().length === 0) {
     return {
+      ok: true,
+      source: "lt",
       issues: [],
       tokensForHighlight: [],
       counts: { spelling: 0, grammar: 0, style: 0, other: 0, total: 0 },
@@ -62,7 +121,11 @@ export async function proof(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ text, language: opts?.language || "en-GB" }),
     });
-    if (!resp.ok) throw new Error(`API /api/proof ${resp.status}`);
+    if (!resp.ok) {
+      const msg = await resp.text();
+      const fb = fallbackCheck(text);
+      return { ...fb, error: `API /api/proof ${resp.status}: ${msg}` };
+    }
     const data = await resp.json();
     const matches = (data?.matches || []) as LTMatch[];
 
@@ -99,13 +162,9 @@ export async function proof(
       total: issues.length,
     };
 
-    return { issues, tokensForHighlight, counts };
-  } catch {
-    // když by server/externí API nešlo, vrátíme prázdno (UI nezkolabuje)
-    return {
-      issues: [],
-      tokensForHighlight: [],
-      counts: { spelling: 0, grammar: 0, style: 0, other: 0, total: 0 },
-    };
+    return { ok: true, source: "lt", issues, tokensForHighlight, counts };
+  } catch (e: any) {
+    const fb = fallbackCheck(text);
+    return { ...fb, error: e?.message || "Network error" };
   }
 }
