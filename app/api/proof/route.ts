@@ -14,6 +14,7 @@ export async function POST(req: Request) {
       body: new URLSearchParams({
         text,
         language: language || "en-GB",
+        enabledOnly: "false",           // ✅ přidáno – jinak LT vrací prázdné výsledky
       }),
     });
 
